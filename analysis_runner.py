@@ -433,8 +433,11 @@ def run_analysis():
                     print("Error: Task 5 requires 'Vy' data. Skipping task.")
                     continue
                 
-                avg_vy = calc.run_task_5_calculations(vy_data)
-                plot.plot_task_5_heatmaps(avg_vy, mesh, output_dir, base_filename_prefix)
+                task5_results = calc.run_task_5_calculations(vy_data, dates)
+                if task5_results is None or task5_results.get("overall") is None:
+                    print("Warning: Task 5 calculations returned no data. Skipping plotting.")
+                    continue
+                plot.plot_task_5_heatmaps(task5_results, mesh, output_dir, base_filename_prefix)
 
             # --- Task 6 Execution ---
             elif task_to_run == 6:
@@ -444,17 +447,22 @@ def run_analysis():
                     print("Error: Task 6 requires 'Vz' data. Skipping task.")
                     continue
                 
-                avg_vz = calc.run_task_6_calculations(vz_data)
-                plot.plot_task_6_heatmaps(avg_vz, mesh, output_dir, base_filename_prefix)
+                task6_results = calc.run_task_6_calculations(vz_data, dates)
+                if task6_results is None or task6_results.get("overall") is None:
+                    print("Warning: Task 6 calculations returned no data. Skipping plotting.")
+                    continue
+                plot.plot_task_6_heatmaps(task6_results, mesh, output_dir, base_filename_prefix)
 
             # --- Task 7 Execution (NEW) ---
             elif task_to_run == 7:
                 print("\n--- Running Task 7 ---")
                 # TH data is already loaded and checked
                 
-                avg_th = calc.run_task_7_calculations(th_data)
-                if avg_th is not None:
-                    plot.plot_task_7_heatmaps(avg_th, mesh, output_dir, base_filename_prefix)
+                task7_results = calc.run_task_7_calculations(th_data, dates)
+                if task7_results is not None and task7_results.get("overall") is not None:
+                    plot.plot_task_7_heatmaps(task7_results, mesh, output_dir, base_filename_prefix)
+                else:
+                    print("Warning: Task 7 calculations returned no data. Skipping plotting.")
         
         print(f"\n--- Finished processing folder: {selected_folder_name} ---")
 
@@ -467,10 +475,10 @@ def run_analysis():
         # Define the 4 required folders and their plot order
         folders_to_plot = ["exoticshrub", "exoticgrass", "arablecrop", "naturalgrass"]
         plot_order_map = {
-            "exoticshrub": (0, 0), # Top-left
-            "exoticgrass": (0, 1), # Top-right
-            "arablecrop":  (1, 0), # Bottom-left
-            "naturalgrass": (1, 1) # Bottom-right
+            "exoticshrub": (0, 1), # Top-left
+            "exoticgrass": (0, 0), # Top-right
+            "arablecrop":  (1, 1), # Bottom-left
+            "naturalgrass": (1, 0) # Bottom-right
         }
         
         # Check if we have data for all 4

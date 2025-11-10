@@ -16,8 +16,53 @@ import numpy as np
 import pandas as pd
 import multiprocessing
 from datetime import datetime
+from collections import OrderedDict
 
 # --- Constants ---
+# Seasons order for seasonal averaging (Task 5-7)
+SEASON_KEYS = ["winter", "spring", "summer", "autumn"]
+MONTH_TO_SEASON = {
+    12: "winter", 1: "winter", 2: "winter",
+    3: "spring", 4: "spring", 5: "spring",
+    6: "summer", 7: "summer", 8: "summer",
+    9: "autumn", 10: "autumn", 11: "autumn"
+}
+
+def _calculate_seasonal_node_means(time_series_data, dates):
+    """
+    Calculates node-wise seasonal averages given a full time-series array.
+
+    Args:
+        time_series_data (np.ndarray): Shape (n_timesteps, n_nodes)
+        dates (list-like): Sequence of date strings/datetime objects aligned with timesteps
+
+    Returns:
+        OrderedDict: season_key -> seasonal average array (n_nodes,)
+    """
+    seasonal_avgs = OrderedDict()
+    if dates is None or len(dates) == 0:
+        return seasonal_avgs
+
+    if len(dates) != time_series_data.shape[0]:
+        print("Warning: Unable to compute seasonal averages (date count mismatch).")
+        return seasonal_avgs
+
+    datetime_index = pd.to_datetime(dates, errors='coerce')
+    season_indices = {key: [] for key in SEASON_KEYS}
+
+    for idx, dt in enumerate(datetime_index):
+        if pd.isna(dt):
+            continue
+        season_key = MONTH_TO_SEASON.get(dt.month)
+        if season_key:
+            season_indices[season_key].append(idx)
+
+    for season_key in SEASON_KEYS:
+        indices = season_indices.get(season_key, [])
+        if indices:
+            seasonal_avgs[season_key] = np.mean(time_series_data[indices, :], axis=0)
+
+    return seasonal_avgs
 # (None defined, tasks are self-contained)
 
 # --- I/O Helper Functions ---
@@ -478,45 +523,57 @@ def run_task_4_calculations(mesh, th_data, vy_data, dates):
 
 # --- Task 5: Vy Heatmap ---
 
-def run_task_5_calculations(vy_data):
-# ... existing code ...
+def run_task_5_calculations(vy_data, dates=None):
     """
     Main orchestrator for Task 5 calculations (Vy).
     """
     print("Calculating time-average Vy for all nodes...")
     try:
-        avg_vy_all_nodes = np.mean(vy_data, axis=0) 
-        return avg_vy_all_nodes
+        avg_vy_all_nodes = np.mean(vy_data, axis=0)
+        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(vy_data), dates)
+        return {
+            "overall": avg_vy_all_nodes,
+            "seasonal": seasonal_avgs,
+            "season_order": SEASON_KEYS
+        }
     except Exception as e:
         print(f"Error calculating time-average Vy: {e}")
         return None
 
 # --- Task 6: Vz Heatmap ---
 
-def run_task_6_calculations(vz_data):
-# ... existing code ...
+def run_task_6_calculations(vz_data, dates=None):
     """
     Main orchestrator for Task 6 calculations (Vz).
     """
     print("Calculating time-average Vz for all nodes...")
     try:
-        avg_vz_all_nodes = np.mean(vz_data, axis=0) 
-        return avg_vz_all_nodes
+        avg_vz_all_nodes = np.mean(vz_data, axis=0)
+        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(vz_data), dates)
+        return {
+            "overall": avg_vz_all_nodes,
+            "seasonal": seasonal_avgs,
+            "season_order": SEASON_KEYS
+        }
     except Exception as e:
         print(f"Error calculating time-average Vz: {e}")
         return None
 
 # --- Task 7: TH Heatmap (NEW) ---
 
-def run_task_7_calculations(th_data):
-# ... existing code ...
+def run_task_7_calculations(th_data, dates=None):
     """
     Main orchestrator for Task 7 calculations (TH).
     """
     print("Calculating time-average TH for all nodes...")
     try:
-        avg_th_all_nodes = np.mean(th_data, axis=0) 
-        return avg_th_all_nodes
+        avg_th_all_nodes = np.mean(th_data, axis=0)
+        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(th_data), dates)
+        return {
+            "overall": avg_th_all_nodes,
+            "seasonal": seasonal_avgs,
+            "season_order": SEASON_KEYS
+        }
     except Exception as e:
         print(f"Error calculating time-average TH: {e}")
         return None

@@ -19,6 +19,14 @@ Z_VISUAL_OFFSET = 1.24  # meters
 import matplotlib.patches as patches
 from scipy.interpolate import griddata
 
+SEASON_ORDER_DEFAULT = ["winter", "spring", "summer", "autumn"]
+SEASON_DISPLAY_NAMES = {
+    "winter": "Winter (Dec-Feb)",
+    "spring": "Spring (Mar-May)",
+    "summer": "Summer (Jun-Aug)",
+    "autumn": "Autumn (Sep-Nov)"
+}
+
 # Import styling configuration
 try:
     from plot_styles import (
@@ -26,6 +34,7 @@ try:
         REGION_COLORS, 
         REGION_LINEWIDTHS, 
         PLOT_Y_LIMITS,
+        PLOT_FONT_SIZES,
         TASK5_HEATMAP_CONFIG,
         TASK6_HEATMAP_CONFIG,
         TASK7_HEATMAP_CONFIG
@@ -35,6 +44,7 @@ try:
         "REGION_COLORS": REGION_COLORS,
         "REGION_LINEWIDTHS": REGION_LINEWIDTHS,
         "PLOT_Y_LIMITS": PLOT_Y_LIMITS,
+        "PLOT_FONT_SIZES": PLOT_FONT_SIZES,
         "TASK5_HEATMAP_CONFIG": TASK5_HEATMAP_CONFIG,
         "TASK6_HEATMAP_CONFIG": TASK6_HEATMAP_CONFIG,
         "TASK7_HEATMAP_CONFIG": TASK7_HEATMAP_CONFIG
@@ -46,6 +56,7 @@ except ImportError:
         "REGION_COLORS": ['#1f77b4'] * 5,
         "REGION_LINEWIDTHS": [1.5] * 5,
         "PLOT_Y_LIMITS": {},
+        "PLOT_FONT_SIZES": {},
         "TASK5_HEATMAP_CONFIG": {},
         "TASK6_HEATMAP_CONFIG": {},
         "TASK7_HEATMAP_CONFIG": {}
@@ -145,7 +156,7 @@ def plot_task_2_charts(dates, results, output_dir, base_filename_prefix):
                     label=f'Region {i+1}'
                 )
             ax.set_xlabel('Date')
-            ax.set_ylabel('Total Water Storage [m^3]')
+            ax.set_ylabel('Total SWS [m^3]')
             ax.legend(loc='upper left')
             ax.grid(True, axis='y')
             
@@ -296,7 +307,7 @@ def plot_task_2_charts(dates, results, output_dir, base_filename_prefix):
             )
             # --- End of MODIFICATION ---
             
-            ax.set_ylabel('Final Cumulative Increase [m^3]')
+            ax.set_ylabel('Delt_S [m^3]')
             ax.grid(True, axis='y')
             
             # --- MODIFICATION: Adjust Y-axis limits based on plot_styles ---
@@ -450,6 +461,8 @@ def plot_task_8_combined_bar(global_results_cache, folders_to_plot, plot_order_m
         fig, axes = plt.subplots(2, 2, figsize=(20, 14))
         colors = PLOT_STYLES.get('REGION_COLORS', ['#1f77b4'] * 5)
         y_limits_config = PLOT_STYLES.get('PLOT_Y_LIMITS', {})
+        font_config = PLOT_STYLES.get('PLOT_FONT_SIZES', {})
+        subplot_label_size = font_config.get('task8_subplot_label', plt.rcParams.get('axes.labelsize', 12))
         
         # --- MODIFICATION: Add subplot labels ---
         label_map = {
@@ -479,7 +492,7 @@ def plot_task_8_combined_bar(global_results_cache, folders_to_plot, plot_order_m
             label = label_map.get(folder_name)
             if label:
                 ax.text(0.05, 0.95, label, transform=ax.transAxes, 
-                        fontsize=18, fontweight='bold', va='top', ha='left')
+                        fontsize=subplot_label_size, fontweight='bold', va='top', ha='left')
             # --- End MODIFICATION ---
             
             # --- This is the plotting logic copied from plot_task_2_charts (PLOT 5) ---
@@ -503,9 +516,9 @@ def plot_task_8_combined_bar(global_results_cache, folders_to_plot, plot_order_m
                 # capsize=5          # Add caps to error bars
             )
             
-            ax.set_ylabel('Final Cumulative Increase [m^3]')
+            ax.set_ylabel('Delt_S [m^3]')
             ax.grid(True, axis='y')
-            ax.set_title(folder_name)
+            #ax.set_title(folder_name)
             
             # --- Apply Y-axis limits logic (copied) ---
             manual_y_min = y_limits_config.get('Task2_FinalBar_YMin', None)
@@ -598,7 +611,17 @@ def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh):
          return [], None, None, None, {}
     
     # 4. Create colormap normalizer
-    if 'TH' in velocity_name: # Handle TH (sequential)
+    manual_limits = config.get('manual_color_limits')
+    if isinstance(manual_limits, (tuple, list)) and len(manual_limits) == 2:
+        v_min, v_max = manual_limits
+        if v_min is None or v_max is None:
+            manual_limits = None
+    else:
+        manual_limits = None
+
+    if manual_limits:
+        norm = plt.Normalize(manual_limits[0], manual_limits[1])
+    elif 'TH' in velocity_name: # Handle TH (sequential)
         v_min = np.nanmin(np.concatenate(all_profile_data))
         v_max = np.nanmax(np.concatenate(all_profile_data))
         if v_min == v_max: v_max += 0.1 # Avoid error
@@ -687,7 +710,7 @@ def _plot_heatmap_2d(fig, axes, plot_data_list, mappable, velocity_name, config,
             fig.colorbar(c, ax=ax_2d_current, label=f'Average {velocity_name}')
 
 # MODIFICATION: New helper to plot 3D part
-def _plot_heatmap_3d(fig, ax, plot_data_list, mappable, bounds, config, velocity_name):
+def _plot_heatmap_3d(fig, ax, plot_data_list, mappable, bounds, config, velocity_name, add_colorbar=True):
     """
     Plots the 3D heatmap data onto a given 3D axis.
     """
@@ -734,12 +757,13 @@ def _plot_heatmap_3d(fig, ax, plot_data_list, mappable, bounds, config, velocity
         elev=config.get('view_elevation', 25), 
         azim=config.get('view_azimuth', -75)
     ) 
-    fig.colorbar(
-        mappable, ax=ax, 
-        shrink=config.get('colorbar_shrink', 0.6), 
-        aspect=config.get('colorbar_aspect', 15), 
-        label=f'Average {velocity_name}'
-    )
+    if add_colorbar:
+        fig.colorbar(
+            mappable, ax=ax, 
+            shrink=config.get('colorbar_shrink', 0.6), 
+            aspect=config.get('colorbar_aspect', 15), 
+            label=f'Average {velocity_name}'
+        )
 
 # MODIFICATION: New function to create the combined plot
 def _generate_combined_heatmap_plot(
@@ -747,68 +771,219 @@ def _generate_combined_heatmap_plot(
     output_dir, base_filename_prefix
 ):
     """
-    Generates the new combined 2D/3D plot with connecting lines.
+    Generates the combined plot with three 2D slices and one 3D view
+    arranged in a 2x2 layout.
     """
-    print("Generating combined 2D/3D heatmap plot...")
+    print("Generating combined 2x2 heatmap plot...")
     try:
         num_profiles = len(plot_data_list)
         if num_profiles == 0:
             print("Warning: No plot data to generate combined plot.")
             return
+        if num_profiles > 3:
+            print("Warning: More than three profiles supplied; only the first three will be shown in the 2×2 layout.")
 
-        # 1. Create the figure and GridSpec (4:3 ratio)
-        # MODIFICATION: Adjust width_ratios and wspace
-        fig_comb = plt.figure(figsize=(15, 8))
+        combined_figsize = config.get('combined_figsize') or (16, 10)
+        fig_comb = plt.figure(figsize=combined_figsize)
+
+        width_ratios = config.get('combined_width_ratios') or config.get('width_ratios') or [1, 1]
+        height_ratios = config.get('combined_height_ratios') or config.get('height_ratios') or [1, 1]
+        hspace = config.get('combined_hspace', 0.25)
+        wspace = config.get('combined_wspace', 0.3)
+
         gs = fig_comb.add_gridspec(
-            num_profiles, 2, width_ratios=[4, 3], 
-            hspace=0.3, wspace=0.4 # Add more wspace
+            2, 2,
+            width_ratios=width_ratios,
+            height_ratios=height_ratios,
+            hspace=hspace,
+            wspace=wspace
         )
 
-        # 2. Create axes
-        # 3D axis spans all rows in the 2nd column
-        ax_3d_comb = fig_comb.add_subplot(gs[:, 1], projection='3d')
-        # 2D axes are in the 1st column
-        axes_2d_comb = [fig_comb.add_subplot(gs[i, 0]) for i in range(num_profiles)]
+        # Create axes for the 2D slices (top-left, top-right, bottom-left)
+        axes_positions = [(0, 0), (0, 1), (1, 0)]
+        axes_2d_comb = [
+            fig_comb.add_subplot(gs[r, c])
+            for r, c in axes_positions[:num_profiles]
+        ]
 
-        # 3. Plot the 2D and 3D data onto the new axes
-        # MODIFICATION: Call with add_cbar=False
-        _plot_heatmap_2d(fig_comb, axes_2d_comb, plot_data_list, mappable, velocity_name, config, add_cbar=False)
-        _plot_heatmap_3d(fig_comb, ax_3d_comb, plot_data_list, mappable, bounds, config, velocity_name)
-        
-        # 4. MODIFICATION: Add shared labels
-        # Add shared X-label to the *last* 2D axis
-        axes_2d_comb[-1].set_xlabel('Y (Width) [m]')
-        
-        # Add shared Y-label to the *figure*, centered vertically
+        # Create axis for the 3D plot (bottom-right)
+        ax_3d_comb = fig_comb.add_subplot(gs[1, 1], projection='3d')
+
+        # Resolve subplot label styling from configuration
+        show_labels = config.get('show_subplot_labels', False)
+        subplot_labels = config.get('subplot_labels', [])
+        label_fontsize = config.get('subplot_label_fontsize', plt.rcParams.get('axes.labelsize', 12))
+        label_box_props = config.get('subplot_label_box')
+        bbox_props = dict(label_box_props) if isinstance(label_box_props, dict) else None
+        offset_2d = config.get('subplot_label_offset_2d', (0.03, 0.95))
+        align_2d = config.get('subplot_label_alignment_2d', {})
+        ha_2d = align_2d.get('ha', 'left')
+        va_2d = align_2d.get('va', 'top')
+        align_3d = config.get('subplot_label_alignment_3d', {})
+        ha_3d = align_3d.get('ha', 'center')
+        va_3d = align_3d.get('va', 'bottom')
+        z_offset_ratio = config.get('subplot_label_z_offset_ratio', 0.05)
+        z_bounds = bounds.get('z') if isinstance(bounds, dict) else None
+        z_span = None
+        if z_bounds and isinstance(z_bounds, (tuple, list)) and len(z_bounds) == 2:
+            z_span = z_bounds[1] - z_bounds[0]
+        z_offset = (z_span * z_offset_ratio) if z_span not in (None, 0) else 0.0
+        label_limit = min(len(axes_2d_comb), len(subplot_labels))
+        # Plot 2D slices (no additional colorbars; use shared one later)
+        _plot_heatmap_2d(
+            fig_comb, axes_2d_comb,
+            plot_data_list[:len(axes_2d_comb)],
+            mappable, velocity_name, config,
+            add_cbar=False
+        )
+
+        # Annotate 2D subplots if enabled
+        if show_labels and label_limit > 0:
+            if not (isinstance(offset_2d, (tuple, list)) and len(offset_2d) == 2):
+                offset_2d = (0.03, 0.95)
+            x_off, y_off = offset_2d
+            for idx in range(label_limit):
+                ax = axes_2d_comb[idx]
+                label = subplot_labels[idx]
+                ax.text(
+                    x_off, y_off, label,
+                    transform=ax.transAxes,
+                    fontsize=label_fontsize,
+                    fontweight='bold',
+                    ha=ha_2d,
+                    va=va_2d,
+                    bbox=dict(bbox_props) if bbox_props else None
+                )
+
+        # Plot 3D heatmap
+        _plot_heatmap_3d(
+            fig_comb, ax_3d_comb,
+            plot_data_list, mappable, bounds,
+            config, velocity_name, add_colorbar=False
+        )
+
+        # Annotate corresponding 3D surfaces if enabled
+        if show_labels and label_limit > 0:
+            for idx in range(label_limit):
+                data = plot_data_list[idx]
+                label = subplot_labels[idx]
+
+                x_pos = data.get('x_profile', 0.0)
+
+                y_min = data.get('y_min')
+                y_max = data.get('y_max')
+                if y_min is not None and y_max is not None:
+                    y_pos = 0.5 * (y_min + y_max)
+                else:
+                    grid_y = data.get('grid_y')
+                    y_pos = float(np.nanmean(grid_y)) if grid_y is not None else 0.0
+
+                z_base = data.get('z_max')
+                if z_base is None:
+                    grid_z = data.get('grid_z')
+                    z_base = float(np.nanmax(grid_z)) if grid_z is not None else 0.0
+                z_pos = z_base + z_offset
+
+                ax_3d_comb.text(
+                    x_pos, y_pos, z_pos,
+                    label,
+                    fontsize=label_fontsize,
+                    fontweight='bold',
+                    ha=ha_3d,
+                    va=va_3d,
+                    bbox=dict(bbox_props) if bbox_props else None
+                )
+
+        # Shared axes labels (same as before)
+        if axes_2d_comb:
+            axes_2d_comb[-1].set_xlabel('Y (Width) [m]')
         fig_comb.text(
-            0.08, 0.5, 'Z (Vertical) [m]', 
-            va='center', 
-            rotation='vertical',
+            0.05, 0.5, 'Z (Vertical) [m]',
+            va='center', rotation='vertical',
             fontweight='bold',
             fontsize=plt.rcParams.get('axes.labelsize', 15)
         )
 
-        # 5. MODIFICATION: Add shared colorbar
-        # Get position of the 2D axes block
-        pos_top = axes_2d_comb[0].get_position()
-        pos_bottom = axes_2d_comb[-1].get_position()
-        
-        # Define cbar axis position [left, bottom, width, height]
-        cbar_left = pos_top.x1 + 0.02 # Place it to the right of the 2D plots
-        cbar_bottom = pos_bottom.y0
+        # Shared colorbar (placed to the right of the entire grid)
+        cbar_left = 0.92
+        cbar_bottom = 0.12
         cbar_width = 0.015
-        cbar_height = pos_top.y1 - pos_bottom.y0
-        
+        cbar_height = 0.76
         cax = fig_comb.add_axes([cbar_left, cbar_bottom, cbar_width, cbar_height])
         fig_comb.colorbar(mappable, cax=cax, label=f'Average {velocity_name}')
 
-        # 6. Save the combined plot
         save_plot_png(fig_comb, output_dir, f"{base_filename_prefix}_plot_Combined")
 
     except Exception as e:
         print(f"Error generating combined heatmap: {e}")
         if 'fig_comb' in locals():
             plt.close(fig_comb)
+
+
+# --- Seasonal grid helper ---
+def _plot_seasonal_heatmap_grid(
+    seasonal_plot_data,
+    season_order,
+    num_profiles,
+    velocity_name,
+    mappable,
+    output_dir,
+    base_filename_prefix,
+    suffix="SeasonalGrid"
+):
+    if not seasonal_plot_data:
+        print("No seasonal data available for seasonal grid plot.")
+        return
+
+    num_seasons = len(season_order)
+    if num_profiles == 0 or num_seasons == 0:
+        print("Seasonal grid skipped due to empty profile/season configuration.")
+        return
+
+    fig, axes = plt.subplots(
+        num_profiles,
+        num_seasons,
+        figsize=(4.5 * num_seasons, 3.6 * num_profiles),
+        squeeze=False
+    )
+
+    for col, season_key in enumerate(season_order):
+        season_label = SEASON_DISPLAY_NAMES.get(season_key, season_key.title())
+        axes[0, col].set_title(season_label)
+        season_data_list = seasonal_plot_data.get(season_key)
+
+        for row in range(num_profiles):
+            ax = axes[row, col]
+            if season_data_list and row < len(season_data_list):
+                data = season_data_list[row]
+                ax.imshow(
+                    data['grid_vel'],
+                    extent=[data['y_min'], data['y_max'], data['z_min'], data['z_max']],
+                    origin='lower',
+                    cmap=mappable.cmap,
+                    aspect='auto',
+                    norm=mappable.norm
+                )
+                if col == 0:
+                    ax.set_ylabel('Z (Vertical) [m]')
+                if row == num_profiles - 1:
+                    ax.set_xlabel('Y (Width) [m]')
+            else:
+                ax.axis('off')
+
+    fig.subplots_adjust(wspace=0.25, hspace=0.3)
+
+    scalar_mappable = plt.cm.ScalarMappable(cmap=mappable.cmap, norm=mappable.norm)
+    scalar_mappable.set_array([])
+    fig.colorbar(
+        scalar_mappable,
+        ax=axes.ravel().tolist(),
+        label=f'Average {velocity_name}',
+        fraction=0.015,
+        pad=0.02
+    )
+
+    save_plot_png(fig, output_dir, f"{base_filename_prefix}_{suffix}")
 
 
 # --- Visualization helper: shift Z for 2D/3D heatmaps (only for display) ---
@@ -833,13 +1008,23 @@ def _shift_z_for_visual(plot_data_list, bounds, z_offset):
 
 # --- Task-specific wrappers for the generic plotter ---
 
-def plot_task_5_heatmaps(avg_vy, mesh, output_dir, base_filename_prefix):
+def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
     Task 5 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vy.
     """
     velocity_name = "Vy [m/day]"
     config_key = "TASK5_HEATMAP_CONFIG"
+    if results is None:
+        print("Task 5: No calculation results provided. Skipping plots.")
+        return
+
+    avg_vy = results.get("overall")
+    if avg_vy is None:
+        print("Task 5: Missing overall average data. Skipping plots.")
+        return
+    seasonal_avgs = results.get("seasonal", {})
+    season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
     
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
@@ -889,14 +1074,53 @@ def plot_task_5_heatmaps(avg_vy, mesh, output_dir, base_filename_prefix):
         output_dir, base_filename_prefix
     )
 
-def plot_task_6_heatmaps(avg_vz, mesh, output_dir, base_filename_prefix):
+    # 5. Generate seasonal grid (new visualization)
+    if seasonal_avgs:
+        seasonal_plot_data = {}
+        for season_key, season_avg in seasonal_avgs.items():
+            if season_avg is None:
+                continue
+            season_plot_data, _, _, _, _ = _calculate_heatmap_data(
+                season_avg, velocity_name, config_key, mesh
+            )
+            season_plot_data, _ = _shift_z_for_visual(
+                season_plot_data,
+                dict(bounds) if isinstance(bounds, dict) else bounds,
+                Z_VISUAL_OFFSET
+            )
+            if season_plot_data:
+                seasonal_plot_data[season_key] = season_plot_data
+
+        if seasonal_plot_data:
+            _plot_seasonal_heatmap_grid(
+                seasonal_plot_data,
+                season_order,
+                num_profiles,
+                velocity_name,
+                mappable,
+                output_dir,
+                base_filename_prefix,
+                suffix="SeasonalGrid"
+            )
+
+def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
     Task 6 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vz.
     """
     velocity_name = "Vz [m/day]"
     config_key = "TASK6_HEATMAP_CONFIG"
-    
+    if results is None:
+        print("Task 6: No calculation results provided. Skipping plots.")
+        return
+
+    avg_vz = results.get("overall")
+    if avg_vz is None:
+        print("Task 6: Missing overall average data. Skipping plots.")
+        return
+    seasonal_avgs = results.get("seasonal", {})
+    season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
+
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
         avg_vz, velocity_name, config_key, mesh
@@ -945,13 +1169,51 @@ def plot_task_6_heatmaps(avg_vz, mesh, output_dir, base_filename_prefix):
         output_dir, base_filename_prefix
     )
 
-def plot_task_7_heatmaps(avg_th, mesh, output_dir, base_filename_prefix):
+    if seasonal_avgs:
+        seasonal_plot_data = {}
+        for season_key, season_avg in seasonal_avgs.items():
+            if season_avg is None:
+                continue
+            season_plot_data, _, _, _, _ = _calculate_heatmap_data(
+                season_avg, velocity_name, config_key, mesh
+            )
+            season_plot_data, _ = _shift_z_for_visual(
+                season_plot_data,
+                dict(bounds) if isinstance(bounds, dict) else bounds,
+                Z_VISUAL_OFFSET
+            )
+            if season_plot_data:
+                seasonal_plot_data[season_key] = season_plot_data
+
+        if seasonal_plot_data:
+            _plot_seasonal_heatmap_grid(
+                seasonal_plot_data,
+                season_order,
+                num_profiles,
+                velocity_name,
+                mappable,
+                output_dir,
+                base_filename_prefix,
+                suffix="SeasonalGrid"
+            )
+
+def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
     Task 7 specific wrapper.
     Generates 2D, 3D, and Combined plots for average TH.
     """
     velocity_name = "TH" # TH is unitless
     config_key = "TASK7_HEATMAP_CONFIG"
+    if results is None:
+        print("Task 7: No calculation results provided. Skipping plots.")
+        return
+
+    avg_th = results.get("overall")
+    if avg_th is None:
+        print("Task 7: Missing overall average data. Skipping plots.")
+        return
+    seasonal_avgs = results.get("seasonal", {})
+    season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
     
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
@@ -1000,4 +1262,32 @@ def plot_task_7_heatmaps(avg_th, mesh, output_dir, base_filename_prefix):
         plot_data_list, mappable, bounds, config, velocity_name,
         output_dir, base_filename_prefix
     )
+
+    if seasonal_avgs:
+        seasonal_plot_data = {}
+        for season_key, season_avg in seasonal_avgs.items():
+            if season_avg is None:
+                continue
+            season_plot_data, _, _, _, _ = _calculate_heatmap_data(
+                season_avg, velocity_name, config_key, mesh
+            )
+            season_plot_data, _ = _shift_z_for_visual(
+                season_plot_data,
+                dict(bounds) if isinstance(bounds, dict) else bounds,
+                Z_VISUAL_OFFSET
+            )
+            if season_plot_data:
+                seasonal_plot_data[season_key] = season_plot_data
+
+        if seasonal_plot_data:
+            _plot_seasonal_heatmap_grid(
+                seasonal_plot_data,
+                season_order,
+                len(plot_data_list),
+                velocity_name,
+                mappable,
+                output_dir,
+                base_filename_prefix,
+                suffix="SeasonalGrid"
+            )
 
