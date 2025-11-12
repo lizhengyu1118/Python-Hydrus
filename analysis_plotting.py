@@ -18,6 +18,14 @@ Z_VISUAL_OFFSET = 1.24  # meters
 
 import matplotlib.patches as patches
 from scipy.interpolate import griddata
+from scipy.ndimage import label
+import pandas as pd
+
+# Metrics helper
+try:
+    from analysis_metrics import compute_profile_metrics
+except Exception:
+    compute_profile_metrics = None
 
 SEASON_ORDER_DEFAULT = ["winter", "spring", "summer", "autumn"]
 SEASON_DISPLAY_NAMES = {
@@ -26,6 +34,55 @@ SEASON_DISPLAY_NAMES = {
     "summer": "Summer (Jun-Aug)",
     "autumn": "Autumn (Sep-Nov)"
 }
+
+def _extract_largest_region_mask(grid_values, threshold):
+    if grid_values is None:
+        return None
+    mask = grid_values < threshold
+    if not np.any(mask):
+        return None
+
+    structure = np.array([[1, 1, 1],
+                          [1, 1, 1],
+                          [1, 1, 1]])
+    labeled, num = label(mask, structure=structure)
+    if num == 0:
+        return None
+
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0  # background ignore
+    region_label = np.argmax(counts)
+    if counts[region_label] == 0:
+        return None
+    return labeled == region_label
+
+def _build_seasonal_mask_overlay(th_results, mesh):
+    """
+    Builds plot data lists for TH-based seasonal masks so other tasks can overlay them.
+    """
+    if th_results is None:
+        return {}
+    seasonal_avgs = th_results.get("seasonal")
+    if not seasonal_avgs:
+        return {}
+
+    overlay_data = {}
+    season_order = th_results.get("season_order", SEASON_ORDER_DEFAULT)
+    for season_key in season_order:
+        season_avg = seasonal_avgs.get(season_key)
+        if season_avg is None:
+            continue
+        plot_data_list, _, _, _, _ = _calculate_heatmap_data(
+            season_avg,
+            "TH",
+            "TASK7_HEATMAP_CONFIG",
+            mesh
+        )
+        plot_data_list, _ = _shift_z_for_visual(plot_data_list, None, Z_VISUAL_OFFSET)
+        if plot_data_list:
+            overlay_data[season_key] = plot_data_list
+    return overlay_data
+
 
 # Import styling configuration
 try:
@@ -37,7 +94,8 @@ try:
         PLOT_FONT_SIZES,
         TASK5_HEATMAP_CONFIG,
         TASK6_HEATMAP_CONFIG,
-        TASK7_HEATMAP_CONFIG
+        TASK7_HEATMAP_CONFIG,
+        SEASONAL_MASK_CONFIG
     )
     # Create a simple dict for styles to pass around
     PLOT_STYLES = {
@@ -47,7 +105,8 @@ try:
         "PLOT_FONT_SIZES": PLOT_FONT_SIZES,
         "TASK5_HEATMAP_CONFIG": TASK5_HEATMAP_CONFIG,
         "TASK6_HEATMAP_CONFIG": TASK6_HEATMAP_CONFIG,
-        "TASK7_HEATMAP_CONFIG": TASK7_HEATMAP_CONFIG
+        "TASK7_HEATMAP_CONFIG": TASK7_HEATMAP_CONFIG,
+        "SEASONAL_MASK_CONFIG": SEASONAL_MASK_CONFIG
     }
 except ImportError:
     print("Warning: 'plot_styles.py' not found. Using default plot styles.")
@@ -100,6 +159,57 @@ def save_plot_png(figure, output_dir, base_filename):
         
     except Exception as e:
         print(f"Error: Failed to save plot to {base_filename}. Reason: {e}")
+
+# --- Helper: metrics CSV export ---
+
+def _export_metrics_rows(rows, output_dir, base_filename_prefix, suffix, metadata_lines=None):
+    """Save a list of metric-row dicts to CSV alongside plots.
+
+    If metadata_lines is provided (list of strings), they are written as
+    leading commented lines beginning with '# ' to make the CSV
+    self-documented without breaking basic CSV readers.
+    """
+    if not rows:
+        return
+    try:
+        df = pd.DataFrame(rows)
+        filename = f"{base_filename_prefix}_{suffix}.csv"
+        filepath = os.path.join(output_dir, filename)
+        if metadata_lines:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                for line in metadata_lines:
+                    f.write(f"# {line}\n")
+                # blank line to separate header comments from CSV header
+                f.write("\n")
+                df.to_csv(f, index=False)
+        else:
+            df.to_csv(filepath, index=False)
+        log_save_message("Metrics saved", filepath)
+    except Exception as e:
+        print(f"Warning: failed to save metrics CSV: {e}")
+
+def _infer_folder_from_prefix(base_filename_prefix):
+    parts = str(base_filename_prefix).split('_')
+    return parts[1] if len(parts) >= 2 else "unknown"
+
+def _default_metrics_metadata(threshold):
+    """Return standard metadata lines including references and threshold."""
+    lines = [
+        "HYDRUS metrics export (geometric, hydrodynamic, coupling)",
+        f"Mask threshold for TH (dry region): {threshold}",
+        "Columns include: area_m2, area_frac, depth_mean_m, depth_max_m, depth_roughness_m, perimeter_m, "+
+        "Qin_m3_per_day_per_m, Vz_in_mean_m_per_day, Vz_out_mean_m_per_day, fdown_in, dVz_boundary_m_per_day, "+
+        "J_def_vz_m3_per_day_per_m, and context fields (task, variable, vegetation, season, profile_index, x_profile_m)",
+        "References (methodological):",
+        "- Geometric/DSL: Western & Bloschl (1997) J. Hydrol. DOI: 10.1016/S0022-1694(97)00142-X",
+        "  Wang et al. (2019) Sci Rep. DOI: 10.1038/s41598-019-38922-y; Wang et al. (2015) PLOS ONE. DOI: 10.1371/journal.pone.0134902",
+        "  Haines-Young & Chopping (1996) Prog. Phys. Geogr. DOI: 10.1177/030913339602000403",
+        "- Hydrodynamics: Simunek et al. HYDRUS-2D, Vadose Zone J. DOI: 10.2113/3.2.725",
+        "  Beven & Germann (2013) WRR. DOI: 10.1002/wrcr.20156; Harvey & Bencala (1993) WRR. DOI: 10.1029/92WR01960",
+        "- Coupling/deficit: Feddes et al. (1976) J. Hydrol. DOI: 10.1016/0022-1694(76)90017-2; "+
+        "Laio et al. (2001) GRL. DOI: 10.1029/2001GL012905; Rodriguez-Iturbe & Porporato (2004) DOI: 10.1017/CBO9780511535727.004"
+    ]
+    return lines
 
 # --- Task 1 Plotting ---
 
@@ -927,7 +1037,10 @@ def _plot_seasonal_heatmap_grid(
     mappable,
     output_dir,
     base_filename_prefix,
-    suffix="SeasonalGrid"
+    suffix="SeasonalGrid",
+    mask_options=None,
+    mask_overlay_data=None,
+    apply_mask=False
 ):
     if not seasonal_plot_data:
         print("No seasonal data available for seasonal grid plot.")
@@ -947,10 +1060,22 @@ def _plot_seasonal_heatmap_grid(
     fig._skip_tight_layout = True
     fig.subplots_adjust(left=0.07, right=0.88, top=0.93, bottom=0.08, wspace=0.25, hspace=0.25)
 
+    mask_options = mask_options or {}
+    mask_thresh = mask_options.get('threshold', 0.12)
+    mask_color = mask_options.get('color', '#ff0000')
+    mask_linewidth = mask_options.get('linewidth', 1.5)
+    mask_linestyle = mask_options.get('linestyle', '--')
+    mask_alpha = mask_options.get('alpha', 0.8)
+    apply_mask = apply_mask and mask_thresh is not None
+    mask_warning_logged = set()
+
     for col, season_key in enumerate(season_order):
         season_label = SEASON_DISPLAY_NAMES.get(season_key, season_key.title())
         axes[0, col].set_title(season_label)
         season_data_list = seasonal_plot_data.get(season_key)
+        overlay_list = None
+        if mask_overlay_data and season_key in mask_overlay_data:
+            overlay_list = mask_overlay_data.get(season_key)
 
         for row in range(num_profiles):
             ax = axes[row, col]
@@ -964,20 +1089,43 @@ def _plot_seasonal_heatmap_grid(
                     aspect='auto',
                     norm=mappable.norm
                 )
-                # Add subplot labels in first column
-                if col == 0:
-                    label = "(" + chr(ord('a') + row) + ")"
-                    ax.text(
-                        0.03,
-                        0.95,
-                        label,
-                        transform=ax.transAxes,
-                        fontsize=plt.rcParams.get('axes.labelsize', 12),
-                        fontweight='bold',
-                        ha='left',
-                        va='top',
-                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=2)
-                    )
+                label_index = row
+                if label_index < 26:
+                    label = "(" + chr(ord('a') + label_index) + ")"
+                else:
+                    label = f"({label_index+1})"
+                ax.text(
+                    0.03,
+                    0.95,
+                    label,
+                    transform=ax.transAxes,
+                    fontsize=plt.rcParams.get('axes.labelsize', 12),
+                    fontweight='bold',
+                    ha='left',
+                    va='top',
+                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=2)
+                )
+                if apply_mask:
+                    mask_source_list = overlay_list if overlay_list is not None else season_data_list
+                    if mask_source_list and row < len(mask_source_list):
+                        mask_source = mask_source_list[row]
+                        mask_array = _extract_largest_region_mask(mask_source['grid_vel'], mask_thresh)
+                    else:
+                        mask_array = None
+                    if mask_array is not None:
+                        ax.contour(
+                            mask_source['grid_y'],
+                            mask_source['grid_z'],
+                            mask_array.astype(float),
+                            levels=[0.5],
+                            colors=mask_color,
+                            linewidths=mask_linewidth,
+                            linestyles=mask_linestyle,
+                            alpha=mask_alpha
+                        )
+                    elif overlay_list is not None and season_key not in mask_warning_logged:
+                        print(f"Warning: Seasonal mask data missing for season '{season_key}'.")
+                        mask_warning_logged.add(season_key)
                 if col == 0:
                     ax.set_ylabel('Z (Vertical) [m]')
                 if row == num_profiles - 1:
@@ -1019,7 +1167,7 @@ def _shift_z_for_visual(plot_data_list, bounds, z_offset):
 
 # --- Task-specific wrappers for the generic plotter ---
 
-def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
+def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix, th_results=None):
     """
     Task 5 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vy.
@@ -1104,6 +1252,14 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
     )
 
     # 5. Generate seasonal grid (new visualization)
+    mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+    mask_overlay = None
+    apply_mask = mask_config.get('enabled', False)
+    if apply_mask and th_results is not None:
+        mask_overlay = _build_seasonal_mask_overlay(th_results, mesh)
+        if not mask_overlay:
+            print("Warning: Seasonal mask overlay requested but TH data unavailable.")
+
     if seasonal_avgs:
         seasonal_plot_data = {}
         for season_key, season_avg in seasonal_avgs.items():
@@ -1129,10 +1285,13 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=mask_overlay,
+                apply_mask=apply_mask and bool(mask_overlay)
             )
 
-def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
+def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix, th_results=None):
     """
     Task 6 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vz.
@@ -1215,6 +1374,26 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
         output_dir, base_filename_prefix
     )
 
+    mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+    mask_overlay = None
+    apply_mask = mask_config.get('enabled', False)
+    if apply_mask and th_results is not None:
+        mask_overlay = _build_seasonal_mask_overlay(th_results, mesh)
+        if not mask_overlay:
+            print("Warning: Seasonal mask overlay requested but TH data unavailable.")
+
+    # Build TH seasonal plot data for metrics (independent of overlay flag)
+    th_seasonal_for_metrics = {}
+    if th_results is not None and th_results.get("seasonal"):
+        for season_key, season_avg in th_results.get("seasonal").items():
+            if season_avg is None:
+                continue
+            s_list, _, _, _, _ = _calculate_heatmap_data(
+                season_avg, "TH", "TASK7_HEATMAP_CONFIG", mesh
+            )
+            if s_list:
+                th_seasonal_for_metrics[season_key] = s_list
+
     if seasonal_avgs:
         seasonal_plot_data = {}
         for season_key, season_avg in seasonal_avgs.items():
@@ -1240,8 +1419,40 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=mask_overlay,
+                apply_mask=apply_mask and bool(mask_overlay)
             )
+            # --- Metrics export (Vz + coupling with TH) ---
+            try:
+                if compute_profile_metrics is not None and th_seasonal_for_metrics:
+                    rows = []
+                    veg = _infer_folder_from_prefix(base_filename_prefix)
+                    thr = mask_config.get('threshold', 0.12)
+                    for season_key in season_order:
+                        vz_list = seasonal_plot_data.get(season_key)
+                        th_list = th_seasonal_for_metrics.get(season_key)
+                        if not vz_list or not th_list:
+                            continue
+                        for idx in range(min(len(vz_list), len(th_list))):
+                            d_vz = vz_list[idx]
+                            d_th = th_list[idx]
+                            metrics = compute_profile_metrics(d_th, d_vz, thr)
+                            if metrics:
+                                rows.append({
+                                    'task': 'Task6_Vz',
+                                    'variable': 'Vz',
+                                    'vegetation': veg,
+                                    'season': season_key,
+                                    'season_label': SEASON_DISPLAY_NAMES.get(season_key, season_key),
+                                    'profile_index': idx,
+                                    'x_profile_m': d_vz.get('x_profile')
+                                } | metrics)
+                    meta = _default_metrics_metadata(thr)
+                    _export_metrics_rows(rows, output_dir, base_filename_prefix, 'SeasonalMetrics', metadata_lines=meta)
+            except Exception as e:
+                print(f"Warning: Vz metrics export failed: {e}")
 
 def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
@@ -1334,6 +1545,8 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
             season_plot_data, _, _, _, _ = _calculate_heatmap_data(
                 season_avg, velocity_name, config_key, mesh
             )
+            # keep a copy before z-shift for metrics
+            season_plot_data_raw = [dict(d) for d in season_plot_data] if season_plot_data else []
             season_plot_data, _ = _shift_z_for_visual(
                 season_plot_data,
                 dict(bounds) if isinstance(bounds, dict) else bounds,
@@ -1343,6 +1556,7 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 seasonal_plot_data[season_key] = season_plot_data
 
         if seasonal_plot_data:
+            mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
             _plot_seasonal_heatmap_grid(
                 seasonal_plot_data,
                 season_order,
@@ -1351,6 +1565,39 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=None,
+                apply_mask=mask_config.get('enabled', False)
             )
+
+            # --- Metrics export (TH geometry) ---
+            try:
+                if compute_profile_metrics is not None:
+                    rows = []
+                    veg = _infer_folder_from_prefix(base_filename_prefix)
+                    thr = mask_config.get('threshold', 0.12)
+                    for season_key, season_avg in seasonal_avgs.items():
+                        if season_avg is None:
+                            continue
+                        # Recompute raw seasonal plot data (unshifted) for metrics
+                        s_list, _, _, _, _ = _calculate_heatmap_data(
+                            season_avg, velocity_name, config_key, mesh
+                        )
+                        for idx, d_th in enumerate(s_list or []):
+                            metrics = compute_profile_metrics(d_th, None, thr)
+                            if metrics:
+                                rows.append({
+                                    'task': 'Task7_TH',
+                                    'variable': 'TH',
+                                    'vegetation': veg,
+                                    'season': season_key,
+                                    'season_label': SEASON_DISPLAY_NAMES.get(season_key, season_key),
+                                    'profile_index': idx,
+                                    'x_profile_m': d_th.get('x_profile')
+                                } | metrics)
+                    meta = _default_metrics_metadata(thr)
+                    _export_metrics_rows(rows, output_dir, base_filename_prefix, 'SeasonalMetrics', metadata_lines=meta)
+            except Exception as e:
+                print(f"Warning: TH metrics export failed: {e}")
 

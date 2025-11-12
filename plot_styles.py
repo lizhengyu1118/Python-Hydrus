@@ -62,7 +62,7 @@ TASK5_HEATMAP_CONFIG = {
     'cmap': 'coolwarm',
     
     # 3D Plotting Parameters
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -100,7 +100,7 @@ TASK6_HEATMAP_CONFIG = {
     'grid_resolution_z': 200,
     # Different colormap for Vz
     'cmap': 'viridis', 
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -135,7 +135,7 @@ TASK7_HEATMAP_CONFIG = {
     'grid_resolution_z': 200,
     # Different colormap for TH
     'cmap': 'Blues', 
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -158,6 +158,15 @@ TASK7_HEATMAP_CONFIG = {
     'subplot_label_z_offset_ratio': 0.05,
 
     'manual_color_limits': None
+}
+
+SEASONAL_MASK_CONFIG = {
+    'enabled': True,
+    'threshold': 0.12,
+    'color': '#ff0000',
+    'linewidth': 2.0,
+    'linestyle': '-',
+    'alpha': 0.8
 }
 
 # Define a dictionary to hold all manual Y-axis limits.
@@ -241,7 +250,7 @@ def set_scientific_style(grid_alpha=0.5):
         'grid.alpha': grid_alpha,
         
         # MODIFICATION: Set savefig DPI
-        'savefig.dpi': 300
+        'savefig.dpi': 600
     })
     
     print("Applied global scientific plotting style (using seaborn-white base, Arial font).")

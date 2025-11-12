@@ -50,13 +50,14 @@ except ImportError:
 
 # 4. Styling & Configuration
 try:
-    from plot_styles import set_scientific_style
+    from plot_styles import set_scientific_style, SEASONAL_MASK_CONFIG
 except ImportError:
     print("Warning: 'plot_styles.py' not found.")
     print("Plots will use default matplotlib styling.")
     def set_scientific_style(grid_alpha=0.5):
         print("Using default plot style (plot_styles.py not found).")
         pass
+    SEASONAL_MASK_CONFIG = {"enabled": False}
 
 # 5. Email Notifier
 try:
@@ -225,6 +226,8 @@ def run_analysis():
     
     # --- MODIFICATION: Add cache for Task 8 ---
     global_results_cache = {}
+    # Cache Task 7 (TH) results per folder to avoid cross-folder reuse
+    task7_results_cache = {}
     # --- End MODIFICATION ---
     
     # 4. === MAIN FOLDER LOOP ===
@@ -437,7 +440,19 @@ def run_analysis():
                 if task5_results is None or task5_results.get("overall") is None:
                     print("Warning: Task 5 calculations returned no data. Skipping plotting.")
                     continue
-                plot.plot_task_5_heatmaps(task5_results, mesh, output_dir, base_filename_prefix)
+                th_mask_results = None
+                if SEASONAL_MASK_CONFIG.get('enabled', False):
+                    th_mask_results = task7_results_cache.get(selected_folder_name)
+                    if th_mask_results is None:
+                        th_mask_results = calc.run_task_7_calculations(th_data, dates)
+                        task7_results_cache[selected_folder_name] = th_mask_results
+                plot.plot_task_5_heatmaps(
+                    task5_results,
+                    mesh,
+                    output_dir,
+                    base_filename_prefix,
+                    th_mask_results
+                )
 
             # --- Task 6 Execution ---
             elif task_to_run == 6:
@@ -451,16 +466,31 @@ def run_analysis():
                 if task6_results is None or task6_results.get("overall") is None:
                     print("Warning: Task 6 calculations returned no data. Skipping plotting.")
                     continue
-                plot.plot_task_6_heatmaps(task6_results, mesh, output_dir, base_filename_prefix)
+                th_mask_results = None
+                if SEASONAL_MASK_CONFIG.get('enabled', False):
+                    th_mask_results = task7_results_cache.get(selected_folder_name)
+                    if th_mask_results is None:
+                        th_mask_results = calc.run_task_7_calculations(th_data, dates)
+                        task7_results_cache[selected_folder_name] = th_mask_results
+                plot.plot_task_6_heatmaps(
+                    task6_results,
+                    mesh,
+                    output_dir,
+                    base_filename_prefix,
+                    th_mask_results
+                )
 
             # --- Task 7 Execution (NEW) ---
             elif task_to_run == 7:
                 print("\n--- Running Task 7 ---")
                 # TH data is already loaded and checked
                 
-                task7_results = calc.run_task_7_calculations(th_data, dates)
-                if task7_results is not None and task7_results.get("overall") is not None:
-                    plot.plot_task_7_heatmaps(task7_results, mesh, output_dir, base_filename_prefix)
+                th_results = task7_results_cache.get(selected_folder_name)
+                if th_results is None:
+                    th_results = calc.run_task_7_calculations(th_data, dates)
+                    task7_results_cache[selected_folder_name] = th_results
+                if th_results is not None and th_results.get("overall") is not None:
+                    plot.plot_task_7_heatmaps(th_results, mesh, output_dir, base_filename_prefix)
                 else:
                     print("Warning: Task 7 calculations returned no data. Skipping plotting.")
         
