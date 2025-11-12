@@ -9,7 +9,6 @@ It is called by 'analysis_runner.py'.
 """
 
 import os
-import json
 import numpy as np
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
@@ -27,47 +26,6 @@ SEASON_DISPLAY_NAMES = {
     "summer": "Summer (Jun-Aug)",
     "autumn": "Autumn (Sep-Nov)"
 }
-COLOR_LIMITS_FILENAME = "color_limits.json"
-_COLOR_LIMITS_COMPUTED_THIS_SESSION = set()
-
-def _get_color_limits_path(output_dir):
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(output_dir, COLOR_LIMITS_FILENAME)
-
-def _load_color_limits(output_dir):
-    path = _get_color_limits_path(output_dir)
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"Warning: Failed to load color limits from {path}: {e}")
-        return {}
-
-def _save_color_limits(output_dir, color_limits):
-    path = _get_color_limits_path(output_dir)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(color_limits, f, indent=2)
-        print(f"Saved color limits to {path}")
-    except Exception as e:
-        print(f"Warning: Failed to save color limits to {path}: {e}")
-
-def _normalize_limits_tuple(value):
-    if isinstance(value, (tuple, list)) and len(value) == 2:
-        vmin, vmax = value
-        if vmin is None or vmax is None:
-            return None
-        try:
-            return (float(vmin), float(vmax))
-        except (TypeError, ValueError):
-            return None
-    return None
 
 # Import styling configuration
 try:
@@ -603,7 +561,7 @@ def plot_task_8_combined_bar(global_results_cache, folders_to_plot, plot_order_m
 # --- Task 5, 6, 7 Generic Heatmap Plotter ---
 
 # MODIFICATION: This is the new helper function to calculate data
-def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh, manual_limits=None):
+def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh):
     """
     Pre-calculates all interpolation data for heatmap plots.
     """
@@ -614,7 +572,7 @@ def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh, manu
         return [], None, None, None, {}
         
     # 1. Load configuration
-    config = dict(PLOT_STYLES.get(config_key, {}))
+    config = PLOT_STYLES.get(config_key, {})
     x_profiles = config.get('x_profile_m_list', [15.0, 30.0, 45.0])
     x_tol = config.get('x_tolerance_m', 0.5)
     grid_res_y = config.get('grid_resolution_y', 100)
@@ -651,16 +609,12 @@ def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh, manu
          return [], None, None, None, {}
     
     # 4. Create colormap normalizer
-    if manual_limits is None:
-        config_manual = config.get('manual_color_limits')
-        if isinstance(config_manual, (tuple, list)) and len(config_manual) == 2:
-            manual_limits = config_manual
-    if isinstance(manual_limits, (tuple, list)) and len(manual_limits) == 2:
-        v_min, v_max = manual_limits
-        if v_min is None or v_max is None:
+    manual_limits = config.get('manual_color_limits')
+    if manual_limits and isinstance(manual_limits, (tuple, list)) and len(manual_limits) == 2:
+        if manual_limits[0] is not None and manual_limits[1] is not None:
+            norm = plt.Normalize(manual_limits[0], manual_limits[1])
+        else:
             manual_limits = None
-    else:
-        manual_limits = None
 
     if manual_limits:
         norm = plt.Normalize(manual_limits[0], manual_limits[1])
@@ -1010,6 +964,20 @@ def _plot_seasonal_heatmap_grid(
                     aspect='auto',
                     norm=mappable.norm
                 )
+                # Add subplot labels in first column
+                if col == 0:
+                    label = "(" + chr(ord('a') + row) + ")"
+                    ax.text(
+                        0.03,
+                        0.95,
+                        label,
+                        transform=ax.transAxes,
+                        fontsize=plt.rcParams.get('axes.labelsize', 12),
+                        fontweight='bold',
+                        ha='left',
+                        va='top',
+                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=2)
+                    )
                 if col == 0:
                     ax.set_ylabel('Z (Vertical) [m]')
                 if row == num_profiles - 1:
@@ -1070,35 +1038,13 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
     season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
     
     # 1. Calculate data
-    color_limit_store = _load_color_limits(output_dir)
-    task_key = "Task5"
-    base_config = PLOT_STYLES.get(config_key, {})
-    manual_override = _normalize_limits_tuple(base_config.get('manual_color_limits'))
-    saved_entry = None
-    if manual_override is None:
-        if task_key not in _COLOR_LIMITS_COMPUTED_THIS_SESSION:
-            saved_entry = color_limit_store.get(task_key)
-        if isinstance(saved_entry, dict):
-            manual_override = _normalize_limits_tuple((saved_entry.get("vmin"), saved_entry.get("vmax")))
-
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
-        avg_vy, velocity_name, config_key, mesh, manual_limits=manual_override
+        avg_vy, velocity_name, config_key, mesh
     )
     plot_data_list, bounds = _shift_z_for_visual(plot_data_list, bounds, Z_VISUAL_OFFSET)
     if not plot_data_list: 
         print("Task 5: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
-
-    used_limits = (mappable.norm.vmin, mappable.norm.vmax)
-    if manual_override is None:
-        saved_entry = color_limit_store.get(task_key)
-        if (not saved_entry or task_key in _COLOR_LIMITS_COMPUTED_THIS_SESSION) and None not in used_limits:
-            color_limit_store[task_key] = {
-                "vmin": float(used_limits[0]),
-                "vmax": float(used_limits[1])
-            }
-            _save_color_limits(output_dir, color_limit_store)
-            _COLOR_LIMITS_COMPUTED_THIS_SESSION.add(task_key)
 
     num_profiles = len(plot_data_list)
     axes_list_flat = [] # To store flattened axes
@@ -1139,6 +1085,14 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 5 3D plot: {e}")
@@ -1156,8 +1110,7 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
             if season_avg is None:
                 continue
             season_plot_data, _, _, _, _ = _calculate_heatmap_data(
-                season_avg, velocity_name, config_key, mesh,
-                manual_limits=manual_override or used_limits
+                season_avg, velocity_name, config_key, mesh
             )
             season_plot_data, _ = _shift_z_for_visual(
                 season_plot_data,
@@ -1198,35 +1151,13 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
     season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
 
     # 1. Calculate data
-    color_limit_store = _load_color_limits(output_dir)
-    task_key = "Task6"
-    base_config = PLOT_STYLES.get(config_key, {})
-    manual_override = _normalize_limits_tuple(base_config.get('manual_color_limits'))
-    saved_entry = None
-    if manual_override is None:
-        if task_key not in _COLOR_LIMITS_COMPUTED_THIS_SESSION:
-            saved_entry = color_limit_store.get(task_key)
-        if isinstance(saved_entry, dict):
-            manual_override = _normalize_limits_tuple((saved_entry.get("vmin"), saved_entry.get("vmax")))
-
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
-        avg_vz, velocity_name, config_key, mesh, manual_limits=manual_override
+        avg_vz, velocity_name, config_key, mesh
     )
     plot_data_list, bounds = _shift_z_for_visual(plot_data_list, bounds, Z_VISUAL_OFFSET)
     if not plot_data_list: 
         print("Task 6: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
-
-    used_limits = (mappable.norm.vmin, mappable.norm.vmax)
-    if manual_override is None:
-        saved_entry = color_limit_store.get(task_key)
-        if (not saved_entry or task_key in _COLOR_LIMITS_COMPUTED_THIS_SESSION) and None not in used_limits:
-            color_limit_store[task_key] = {
-                "vmin": float(used_limits[0]),
-                "vmax": float(used_limits[1])
-            }
-            _save_color_limits(output_dir, color_limit_store)
-            _COLOR_LIMITS_COMPUTED_THIS_SESSION.add(task_key)
 
     num_profiles = len(plot_data_list)
     axes_list_flat = []
@@ -1266,6 +1197,14 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 6 3D plot: {e}")
@@ -1282,8 +1221,7 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
             if season_avg is None:
                 continue
             season_plot_data, _, _, _, _ = _calculate_heatmap_data(
-                season_avg, velocity_name, config_key, mesh,
-                manual_limits=manual_override or used_limits
+                season_avg, velocity_name, config_key, mesh
             )
             season_plot_data, _ = _shift_z_for_visual(
                 season_plot_data,
@@ -1324,35 +1262,13 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
     
     # 1. Calculate data
-    color_limit_store = _load_color_limits(output_dir)
-    task_key = "Task7"
-    base_config = PLOT_STYLES.get(config_key, {})
-    manual_override = _normalize_limits_tuple(base_config.get('manual_color_limits'))
-    saved_entry = None
-    if manual_override is None:
-        if task_key not in _COLOR_LIMITS_COMPUTED_THIS_SESSION:
-            saved_entry = color_limit_store.get(task_key)
-        if isinstance(saved_entry, dict):
-            manual_override = _normalize_limits_tuple((saved_entry.get("vmin"), saved_entry.get("vmax")))
-
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
-        avg_th, velocity_name, config_key, mesh, manual_limits=manual_override
+        avg_th, velocity_name, config_key, mesh
     )
     plot_data_list, bounds = _shift_z_for_visual(plot_data_list, bounds, Z_VISUAL_OFFSET)
     if not plot_data_list: 
         print("Task 7: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
-
-    used_limits = (mappable.norm.vmin, mappable.norm.vmax)
-    if manual_override is None:
-        saved_entry = color_limit_store.get(task_key)
-        if (not saved_entry or task_key in _COLOR_LIMITS_COMPUTED_THIS_SESSION) and None not in used_limits:
-            color_limit_store[task_key] = {
-                "vmin": float(used_limits[0]),
-                "vmax": float(used_limits[1])
-            }
-            _save_color_limits(output_dir, color_limit_store)
-            _COLOR_LIMITS_COMPUTED_THIS_SESSION.add(task_key)
 
     num_profiles = len(plot_data_list)
     axes_list_flat = []
@@ -1392,6 +1308,14 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 7 3D plot: {e}")
@@ -1408,8 +1332,7 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
             if season_avg is None:
                 continue
             season_plot_data, _, _, _, _ = _calculate_heatmap_data(
-                season_avg, velocity_name, config_key, mesh,
-                manual_limits=manual_override or used_limits
+                season_avg, velocity_name, config_key, mesh
             )
             season_plot_data, _ = _shift_z_for_visual(
                 season_plot_data,
