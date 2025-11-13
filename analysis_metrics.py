@@ -191,7 +191,73 @@ def coupling_metrics(grid_th: np.ndarray, grid_vz: np.ndarray, threshold: float,
 
 # --- Convenience aggregator ---
 
-def compute_profile_metrics(th_data: Optional[dict], vz_data: Optional[dict], threshold: float) -> Dict[str, float]:
+def _water_deficit_metrics(th_grid: np.ndarray,
+                           y_min: float, y_max: float, z_min: float, z_max: float,
+                           theta_fc: float,
+                           mask: Optional[np.ndarray] = None) -> Dict[str, float]:
+    """Compute water deficit metrics.
+
+    For each column j, deficit depth D(y_j) = ∫ max(0, theta_fc - theta(z,y_j)) dz.
+    Returns overall mean and max over y, and sectional deficit volume
+    V_def = ∬ max(0, theta_fc - theta) dA (units m^2 per meter in X).
+    If a mask is provided, an additional masked sectional volume is returned.
+    """
+    if theta_fc is None:
+        return {}
+    if th_grid is None:
+        return {}
+    nz, ny = th_grid.shape
+    dy, dz, _ = _grid_spacings(y_min, y_max, z_min, z_max, th_grid.shape)
+    deficit = np.maximum(0.0, float(theta_fc) - np.asarray(th_grid, dtype=float))
+    # Column-wise depth integrals
+    D_cols = np.sum(deficit, axis=0) * dz  # shape (ny,), units m
+    D_mean = float(np.mean(D_cols)) if D_cols.size else 0.0
+    D_max = float(np.max(D_cols)) if D_cols.size else 0.0
+    V_def = float(np.sum(deficit) * dy * dz)
+    out = {
+        'deficit_depth_mean_m': D_mean,
+        'deficit_depth_max_m': D_max,
+        'deficit_section_volume_m2': V_def
+    }
+    if mask is not None and mask.shape == th_grid.shape and np.any(mask):
+        V_def_mask = float(np.sum(deficit * mask.astype(float)) * dy * dz)
+        out['deficit_section_volume_mask_m2'] = V_def_mask
+    return out
+
+def _sdi_metrics(th_grid: np.ndarray,
+                 mask: Optional[np.ndarray],
+                 sw_s: Optional[float],
+                 sw_h: Optional[float]) -> Dict[str, float]:
+    """Compute Soil Desiccation Index statistics (mean/std/min/max, overall and mask)."""
+    if sw_s is None or sw_h is None:
+        return {}
+    sw_s = float(sw_s)
+    sw_h = float(sw_h)
+    denom = sw_s - sw_h
+    if denom <= 0:
+        return {}
+    th_arr = np.asarray(th_grid, dtype=float)
+    sdi = (sw_s - th_arr) / denom * 100.0
+    # helper to compute stats ignoring NaNs/Infs
+    def stats(arr, prefix):
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return {}
+        return {
+            f'{prefix}_mean_percent': float(np.mean(arr)),
+            f'{prefix}_std_percent': float(np.std(arr, ddof=0)),
+            f'{prefix}_min_percent': float(np.min(arr)),
+            f'{prefix}_max_percent': float(np.max(arr))
+        }
+    results = stats(sdi, 'sdi')
+    if mask is not None and mask.shape == th_arr.shape and np.any(mask):
+        results.update(stats(sdi[mask], 'sdi_mask'))
+    return results
+
+def compute_profile_metrics(th_data: Optional[dict], vz_data: Optional[dict], threshold: float,
+                            theta_fc: Optional[float] = None,
+                            sdi_sw_s: Optional[float] = None,
+                            sdi_sw_h: Optional[float] = None) -> Dict[str, float]:
     """Compute combined metrics for a single profile slice.
 
     th_data / vz_data are dictionaries with keys:
@@ -210,6 +276,16 @@ def compute_profile_metrics(th_data: Optional[dict], vz_data: Optional[dict], th
                 th_data['y_min'], th_data['y_max'], th_data['z_min'], th_data['z_max']
             )
             results.update(gm)
+            # Optional water deficit metrics
+            if theta_fc is not None:
+                wd = _water_deficit_metrics(
+                    th_grid, th_data['y_min'], th_data['y_max'], th_data['z_min'], th_data['z_max'],
+                    theta_fc, mask=mask
+                )
+                results.update(wd)
+            # SDI statistics
+            sdi_stats = _sdi_metrics(th_grid, mask, sdi_sw_s, sdi_sw_h)
+            results.update(sdi_stats)
 
     if vz_data is not None and vz_data.get('grid_vel') is not None and mask is not None:
         fm = flux_metrics(
@@ -227,4 +303,3 @@ def compute_profile_metrics(th_data: Optional[dict], vz_data: Optional[dict], th
             results.update(cm)
 
     return results
-

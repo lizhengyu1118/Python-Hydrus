@@ -157,8 +157,13 @@ TASK7_HEATMAP_CONFIG = {
     'subplot_label_alignment_3d': {'ha': 'center', 'va': 'bottom'},
     'subplot_label_z_offset_ratio': 0.05,
 
-    'manual_color_limits': None
+    'manual_color_limits': None,
+    # Water deficit and SDI parameters
+    'theta_fc': None,       # Optional field capacity for deficit (set per soil)
+    'sdi_sw_s': 0.12,       # Stable water content
+    'sdi_sw_h': 0.085       # Permanent wilting point
 }
+TASK7_HEATMAP_CONFIG['theta_fc'] = 0.20
 
 SEASONAL_MASK_CONFIG = {
     'enabled': True,

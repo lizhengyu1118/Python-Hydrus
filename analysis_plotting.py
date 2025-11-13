@@ -198,8 +198,10 @@ def _default_metrics_metadata(threshold):
         "HYDRUS metrics export (geometric, hydrodynamic, coupling)",
         f"Mask threshold for TH (dry region): {threshold}",
         "Columns include: area_m2, area_frac, depth_mean_m, depth_max_m, depth_roughness_m, perimeter_m, "+
+        "deficit_depth_mean_m/deficit_section_volume_m2 (if theta_fc is set), "+
+        "sdi_mean_percent and mask variants (if SDI enabled), "+
         "Qin_m3_per_day_per_m, Vz_in_mean_m_per_day, Vz_out_mean_m_per_day, fdown_in, dVz_boundary_m_per_day, "+
-        "J_def_vz_m3_per_day_per_m, and context fields (task, variable, vegetation, season, profile_index, x_profile_m)",
+        "J_def_vz_m3_per_day_per_m, plus context fields (task, vegetation, season, profile_index, x_profile_m)",
         "References (methodological):",
         "- Geometric/DSL: Western & Bloschl (1997) J. Hydrol. DOI: 10.1016/S0022-1694(97)00142-X",
         "  Wang et al. (2019) Sci Rep. DOI: 10.1038/s41598-019-38922-y; Wang et al. (2015) PLOS ONE. DOI: 10.1371/journal.pone.0134902",
@@ -1382,18 +1384,6 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix, th_res
         if not mask_overlay:
             print("Warning: Seasonal mask overlay requested but TH data unavailable.")
 
-    # Build TH seasonal plot data for metrics (independent of overlay flag)
-    th_seasonal_for_metrics = {}
-    if th_results is not None and th_results.get("seasonal"):
-        for season_key, season_avg in th_results.get("seasonal").items():
-            if season_avg is None:
-                continue
-            s_list, _, _, _, _ = _calculate_heatmap_data(
-                season_avg, "TH", "TASK7_HEATMAP_CONFIG", mesh
-            )
-            if s_list:
-                th_seasonal_for_metrics[season_key] = s_list
-
     if seasonal_avgs:
         seasonal_plot_data = {}
         for season_key, season_avg in seasonal_avgs.items():
@@ -1424,35 +1414,6 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix, th_res
                 mask_overlay_data=mask_overlay,
                 apply_mask=apply_mask and bool(mask_overlay)
             )
-            # --- Metrics export (Vz + coupling with TH) ---
-            try:
-                if compute_profile_metrics is not None and th_seasonal_for_metrics:
-                    rows = []
-                    veg = _infer_folder_from_prefix(base_filename_prefix)
-                    thr = mask_config.get('threshold', 0.12)
-                    for season_key in season_order:
-                        vz_list = seasonal_plot_data.get(season_key)
-                        th_list = th_seasonal_for_metrics.get(season_key)
-                        if not vz_list or not th_list:
-                            continue
-                        for idx in range(min(len(vz_list), len(th_list))):
-                            d_vz = vz_list[idx]
-                            d_th = th_list[idx]
-                            metrics = compute_profile_metrics(d_th, d_vz, thr)
-                            if metrics:
-                                rows.append({
-                                    'task': 'Task6_Vz',
-                                    'variable': 'Vz',
-                                    'vegetation': veg,
-                                    'season': season_key,
-                                    'season_label': SEASON_DISPLAY_NAMES.get(season_key, season_key),
-                                    'profile_index': idx,
-                                    'x_profile_m': d_vz.get('x_profile')
-                                } | metrics)
-                    meta = _default_metrics_metadata(thr)
-                    _export_metrics_rows(rows, output_dir, base_filename_prefix, 'SeasonalMetrics', metadata_lines=meta)
-            except Exception as e:
-                print(f"Warning: Vz metrics export failed: {e}")
 
 def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
@@ -1471,6 +1432,10 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
         return
     seasonal_avgs = results.get("seasonal", {})
     season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
+    task7_config = PLOT_STYLES.get("TASK7_HEATMAP_CONFIG", {})
+    theta_fc = task7_config.get('theta_fc')
+    sdi_sw_s = task7_config.get('sdi_sw_s', 0.12)
+    sdi_sw_h = task7_config.get('sdi_sw_h', 0.085)
     
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
@@ -1545,8 +1510,6 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
             season_plot_data, _, _, _, _ = _calculate_heatmap_data(
                 season_avg, velocity_name, config_key, mesh
             )
-            # keep a copy before z-shift for metrics
-            season_plot_data_raw = [dict(d) for d in season_plot_data] if season_plot_data else []
             season_plot_data, _ = _shift_z_for_visual(
                 season_plot_data,
                 dict(bounds) if isinstance(bounds, dict) else bounds,
@@ -1570,34 +1533,4 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mask_overlay_data=None,
                 apply_mask=mask_config.get('enabled', False)
             )
-
-            # --- Metrics export (TH geometry) ---
-            try:
-                if compute_profile_metrics is not None:
-                    rows = []
-                    veg = _infer_folder_from_prefix(base_filename_prefix)
-                    thr = mask_config.get('threshold', 0.12)
-                    for season_key, season_avg in seasonal_avgs.items():
-                        if season_avg is None:
-                            continue
-                        # Recompute raw seasonal plot data (unshifted) for metrics
-                        s_list, _, _, _, _ = _calculate_heatmap_data(
-                            season_avg, velocity_name, config_key, mesh
-                        )
-                        for idx, d_th in enumerate(s_list or []):
-                            metrics = compute_profile_metrics(d_th, None, thr)
-                            if metrics:
-                                rows.append({
-                                    'task': 'Task7_TH',
-                                    'variable': 'TH',
-                                    'vegetation': veg,
-                                    'season': season_key,
-                                    'season_label': SEASON_DISPLAY_NAMES.get(season_key, season_key),
-                                    'profile_index': idx,
-                                    'x_profile_m': d_th.get('x_profile')
-                                } | metrics)
-                    meta = _default_metrics_metadata(thr)
-                    _export_metrics_rows(rows, output_dir, base_filename_prefix, 'SeasonalMetrics', metadata_lines=meta)
-            except Exception as e:
-                print(f"Warning: TH metrics export failed: {e}")
 
