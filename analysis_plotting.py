@@ -2066,6 +2066,7 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     theta_fc = task7_config.get('theta_fc')
     sdi_sw_s = task7_config.get('sdi_sw_s', 0.12)
     sdi_sw_h = task7_config.get('sdi_sw_h', 0.085)
+    dsl_metrics_out = {}
     
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(

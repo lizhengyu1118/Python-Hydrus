@@ -81,7 +81,7 @@ RECIPIENT_EMAIL = "lizhengyu1118@gmail.com"
 
 # --- Optional fixed profile date for Task 7 per-folder visualization ---
 # Set to a string like "2013-06-02" to enable; set to None to disable.
-TASK7_PROFILE_DATE = "2012-04-07"
+TASK7_PROFILE_DATE = None
 
 # --- Helper Functions ---
 
