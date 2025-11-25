@@ -18,6 +18,173 @@ Z_VISUAL_OFFSET = 1.24  # meters
 
 import matplotlib.patches as patches
 from scipy.interpolate import griddata
+from scipy.ndimage import label
+import pandas as pd
+
+# Metrics helper
+try:
+    from analysis_metrics import compute_profile_metrics
+except Exception:
+    compute_profile_metrics = None
+
+
+def _profile_labels_from_config(config):
+    """
+    Generate alphabetical labels ('a','b','c',...) matching x_profile_m_list order.
+    """
+    x_profiles = config.get('x_profile_m_list', [])
+    labels = []
+    for i in range(len(x_profiles)):
+        labels.append(chr(ord('a') + i))
+    return labels
+
+
+def _reorder_stat_columns(df):
+    """Ensure CSV columns start with profile_label (and season if present)."""
+    preferred = ["profile_label"]
+    if "season" in df.columns:
+        preferred.append("season")
+    preferred += ["x_profile_m", "min", "max", "mean", "std", "cv", "n_points"]
+    return df[[c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]]
+
+
+def _compute_dsl_metrics_from_plot_data(plot_data_list, threshold, season_key=None):
+    """
+    Compute dry-soil-layer metrics (area fraction and weighted centroid) on heatmap grids.
+    Uses grid values (already averaged for the season), not raw time series.
+    """
+    metrics = []
+    for pd in plot_data_list:
+        data = np.asarray(pd.get('grid_vel'))
+        if data is None or data.size == 0:
+            continue
+        mask = data < threshold
+        if not np.any(mask):
+            metrics.append({
+                "season": season_key,
+                "profile_label": "",
+                "x_profile_m": pd.get("x_profile"),
+                "dsl_area_frac": 0.0,
+                "dsl_centroid_y": np.nan,
+                "dsl_centroid_z": np.nan
+            })
+            continue
+
+        y_min, y_max = pd.get('y_min'), pd.get('y_max')
+        z_min, z_max = pd.get('z_min'), pd.get('z_max')
+        ny, nz = data.shape[1], data.shape[0]
+        dy = 0.0 if ny <= 1 else (y_max - y_min) / (ny - 1)
+        dz = 0.0 if nz <= 1 else (z_max - z_min) / (nz - 1)
+        total_area = max(y_max - y_min, 0.0) * max(z_max - z_min, 0.0)
+        dA = dy * dz
+        area = float(mask.sum()) * dA
+        area_frac = float(area / total_area) if total_area > 0 else 0.0
+
+        weights = (threshold - data) * mask
+        weights[weights < 0] = 0
+        total_weight = float(np.sum(weights))
+        if total_weight > 0:
+            # Use physical coordinates from grid_y/grid_z if available; fallback to indices
+            gy = np.asarray(pd.get('grid_y')) if pd.get('grid_y') is not None else None
+            gz = np.asarray(pd.get('grid_z')) if pd.get('grid_z') is not None else None
+            if gy is not None and gz is not None and gy.shape == data.shape and gz.shape == data.shape:
+                core_y = float(np.sum(gy * weights) / total_weight)
+                core_z = float(np.sum(gz * weights) / total_weight)
+            else:
+                y_idx, z_idx = np.meshgrid(np.arange(data.shape[1]), np.arange(data.shape[0]))
+                core_y = float(np.sum(y_idx * weights) / total_weight)
+                core_z = float(np.sum(z_idx * weights) / total_weight)
+        else:
+            core_y = np.nan
+            core_z = np.nan
+
+        metrics.append({
+            "season": season_key,
+            "profile_label": "",
+            "x_profile_m": pd.get("x_profile"),
+            "dsl_area_frac": area_frac,
+            "dsl_centroid_y": core_y,
+            "dsl_centroid_z": core_z
+        })
+    return metrics
+
+
+def _summarize_heatmap_profiles(
+    plot_data_list,
+    velocity_name,
+    output_dir,
+    base_filename_prefix,
+    suffix=None,
+    extra_fields=None,
+    write_csv=True,
+    return_rows=False,
+    x_profile_labels=None,
+):
+    """
+    Compute min/max/std/mean/cv for each Y-Z profile used in the heatmap PNGs,
+    echo them to the terminal, and persist to CSV next to the plots.
+    """
+    if not plot_data_list:
+        return [] if return_rows else None
+
+    rows = []
+    print(f"\nProfile statistics for {velocity_name}:")
+    for idx, data in enumerate(plot_data_list):
+        grid = np.asarray(data.get('grid_vel'))
+        x_profile = data.get('x_profile')
+        label = None
+        if isinstance(x_profile_labels, (list, tuple)) and idx < len(x_profile_labels):
+            label = x_profile_labels[idx]
+        finite_vals = grid[np.isfinite(grid)] if grid is not None else np.array([])
+        if finite_vals.size == 0:
+            print(f"  X={x_profile} m → no finite values (skipped)")
+            continue
+
+        v_min = float(np.min(finite_vals))
+        v_max = float(np.max(finite_vals))
+        v_std = float(np.std(finite_vals))
+        v_mean = float(np.mean(finite_vals))
+        v_cv = float(v_std / v_mean) if v_mean != 0 else np.nan
+        prefix = f"[{label}] " if label else ""
+        print(f"  {prefix}X={x_profile} m → min={v_min:.4f}, max={v_max:.4f}, std={v_std:.4f}, mean={v_mean:.4f}, cv={v_cv:.4f}")
+
+        base_row = {
+            "profile_label": label if label is not None else "",
+            "x_profile_m": x_profile,
+            "min": v_min,
+            "max": v_max,
+            "std": v_std,
+            "mean": v_mean,
+            "cv": v_cv,
+            "n_points": int(finite_vals.size)
+        }
+        if isinstance(extra_fields, dict):
+            base_row.update(extra_fields)
+        rows.append(base_row)
+
+    if not rows:
+        return [] if return_rows else None
+
+    if return_rows:
+        return rows
+
+    df = pd.DataFrame(rows)
+    if "season" in df.columns:
+        df = df.sort_values(["season", "x_profile_m"])
+    else:
+        df = df.sort_values("x_profile_m")
+    df = _reorder_stat_columns(df)
+
+    stats_suffix = f"_{suffix}" if suffix else ""
+    csv_name = f"{base_filename_prefix}_profile_stats{stats_suffix}.csv"
+    csv_path = os.path.join(output_dir, csv_name)
+    if write_csv:
+        try:
+            df.to_csv(csv_path, index=False)
+            print(f"Saved profile statistics to {os.path.abspath(csv_path)}")
+        except Exception as exc:
+            print(f"Warning: Failed to save profile stats CSV ({csv_name}): {exc}")
+    return rows
 
 SEASON_ORDER_DEFAULT = ["winter", "spring", "summer", "autumn"]
 SEASON_DISPLAY_NAMES = {
@@ -26,6 +193,55 @@ SEASON_DISPLAY_NAMES = {
     "summer": "Summer (Jun-Aug)",
     "autumn": "Autumn (Sep-Nov)"
 }
+
+def _extract_largest_region_mask(grid_values, threshold):
+    if grid_values is None:
+        return None
+    mask = grid_values < threshold
+    if not np.any(mask):
+        return None
+
+    structure = np.array([[1, 1, 1],
+                          [1, 1, 1],
+                          [1, 1, 1]])
+    labeled, num = label(mask, structure=structure)
+    if num == 0:
+        return None
+
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0  # background ignore
+    region_label = np.argmax(counts)
+    if counts[region_label] == 0:
+        return None
+    return labeled == region_label
+
+def _build_seasonal_mask_overlay(th_results, mesh):
+    """
+    Builds plot data lists for TH-based seasonal masks so other tasks can overlay them.
+    """
+    if th_results is None:
+        return {}
+    seasonal_avgs = th_results.get("seasonal")
+    if not seasonal_avgs:
+        return {}
+
+    overlay_data = {}
+    season_order = th_results.get("season_order", SEASON_ORDER_DEFAULT)
+    for season_key in season_order:
+        season_avg = seasonal_avgs.get(season_key)
+        if season_avg is None:
+            continue
+        plot_data_list, _, _, _, _ = _calculate_heatmap_data(
+            season_avg,
+            "TH",
+            "TASK7_HEATMAP_CONFIG",
+            mesh
+        )
+        plot_data_list, _ = _shift_z_for_visual(plot_data_list, None, Z_VISUAL_OFFSET)
+        if plot_data_list:
+            overlay_data[season_key] = plot_data_list
+    return overlay_data
+
 
 # Import styling configuration
 try:
@@ -37,7 +253,8 @@ try:
         PLOT_FONT_SIZES,
         TASK5_HEATMAP_CONFIG,
         TASK6_HEATMAP_CONFIG,
-        TASK7_HEATMAP_CONFIG
+        TASK7_HEATMAP_CONFIG,
+        SEASONAL_MASK_CONFIG
     )
     # Create a simple dict for styles to pass around
     PLOT_STYLES = {
@@ -47,7 +264,8 @@ try:
         "PLOT_FONT_SIZES": PLOT_FONT_SIZES,
         "TASK5_HEATMAP_CONFIG": TASK5_HEATMAP_CONFIG,
         "TASK6_HEATMAP_CONFIG": TASK6_HEATMAP_CONFIG,
-        "TASK7_HEATMAP_CONFIG": TASK7_HEATMAP_CONFIG
+        "TASK7_HEATMAP_CONFIG": TASK7_HEATMAP_CONFIG,
+        "SEASONAL_MASK_CONFIG": SEASONAL_MASK_CONFIG
     }
 except ImportError:
     print("Warning: 'plot_styles.py' not found. Using default plot styles.")
@@ -87,13 +305,11 @@ def save_plot_png(figure, output_dir, base_filename):
             
         filepath = os.path.join(output_dir, base_filename)
         
-        # Apply tight_layout only to 2D figures
-        if not base_filename.endswith("_3D.png") and not base_filename.endswith("_Combined.png"):
-             figure.tight_layout()
-        elif base_filename.endswith("_Combined.png"):
-             # Use a different layout for the combined plot
-             # figure.tight_layout(pad=1.5) # <-- MODIFICATION: Removed to prevent unpack error
-             pass
+        # Apply tight_layout only to 2D figures (unless explicitly skipped)
+        skip_tight = getattr(figure, "_skip_tight_layout", False) or base_filename.endswith("_SeasonalGrid.png")
+        if not skip_tight:
+            if not base_filename.endswith("_3D.png") and not base_filename.endswith("_Combined.png"):
+                 figure.tight_layout()
              
         figure.savefig(filepath)
         plt.close(figure) # Explicitly close the figure object
@@ -102,6 +318,59 @@ def save_plot_png(figure, output_dir, base_filename):
         
     except Exception as e:
         print(f"Error: Failed to save plot to {base_filename}. Reason: {e}")
+
+# --- Helper: metrics CSV export ---
+
+def _export_metrics_rows(rows, output_dir, base_filename_prefix, suffix, metadata_lines=None):
+    """Save a list of metric-row dicts to CSV alongside plots.
+
+    If metadata_lines is provided (list of strings), they are written as
+    leading commented lines beginning with '# ' to make the CSV
+    self-documented without breaking basic CSV readers.
+    """
+    if not rows:
+        return
+    try:
+        df = pd.DataFrame(rows)
+        filename = f"{base_filename_prefix}_{suffix}.csv"
+        filepath = os.path.join(output_dir, filename)
+        if metadata_lines:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                for line in metadata_lines:
+                    f.write(f"# {line}\n")
+                # blank line to separate header comments from CSV header
+                f.write("\n")
+                df.to_csv(f, index=False)
+        else:
+            df.to_csv(filepath, index=False)
+        log_save_message("Metrics saved", filepath)
+    except Exception as e:
+        print(f"Warning: failed to save metrics CSV: {e}")
+
+def _infer_folder_from_prefix(base_filename_prefix):
+    parts = str(base_filename_prefix).split('_')
+    return parts[1] if len(parts) >= 2 else "unknown"
+
+def _default_metrics_metadata(threshold):
+    """Return standard metadata lines including references and threshold."""
+    lines = [
+        "HYDRUS metrics export (geometric, hydrodynamic, coupling)",
+        f"Mask threshold for TH (dry region): {threshold}",
+        "Columns include: area_m2, area_frac, depth_mean_m, depth_max_m, depth_roughness_m, perimeter_m, "+
+        "deficit_depth_mean_m/deficit_section_volume_m2 (if theta_fc is set), "+
+        "sdi_mean_percent and mask variants (if SDI enabled), "+
+        "Qin_m3_per_day_per_m, Vz_in_mean_m_per_day, Vz_out_mean_m_per_day, fdown_in, dVz_boundary_m_per_day, "+
+        "J_def_vz_m3_per_day_per_m, plus context fields (task, vegetation, season, profile_index, x_profile_m)",
+        "References (methodological):",
+        "- Geometric/DSL: Western & Bloschl (1997) J. Hydrol. DOI: 10.1016/S0022-1694(97)00142-X",
+        "  Wang et al. (2019) Sci Rep. DOI: 10.1038/s41598-019-38922-y; Wang et al. (2015) PLOS ONE. DOI: 10.1371/journal.pone.0134902",
+        "  Haines-Young & Chopping (1996) Prog. Phys. Geogr. DOI: 10.1177/030913339602000403",
+        "- Hydrodynamics: Simunek et al. HYDRUS-2D, Vadose Zone J. DOI: 10.2113/3.2.725",
+        "  Beven & Germann (2013) WRR. DOI: 10.1002/wrcr.20156; Harvey & Bencala (1993) WRR. DOI: 10.1029/92WR01960",
+        "- Coupling/deficit: Feddes et al. (1976) J. Hydrol. DOI: 10.1016/0022-1694(76)90017-2; "+
+        "Laio et al. (2001) GRL. DOI: 10.1029/2001GL012905; Rodriguez-Iturbe & Porporato (2004) DOI: 10.1017/CBO9780511535727.004"
+    ]
+    return lines
 
 # --- Task 1 Plotting ---
 
@@ -612,12 +881,11 @@ def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh):
     
     # 4. Create colormap normalizer
     manual_limits = config.get('manual_color_limits')
-    if isinstance(manual_limits, (tuple, list)) and len(manual_limits) == 2:
-        v_min, v_max = manual_limits
-        if v_min is None or v_max is None:
+    if manual_limits and isinstance(manual_limits, (tuple, list)) and len(manual_limits) == 2:
+        if manual_limits[0] is not None and manual_limits[1] is not None:
+            norm = plt.Normalize(manual_limits[0], manual_limits[1])
+        else:
             manual_limits = None
-    else:
-        manual_limits = None
 
     if manual_limits:
         norm = plt.Normalize(manual_limits[0], manual_limits[1])
@@ -683,6 +951,92 @@ def _calculate_heatmap_data(velocity_data, velocity_name, config_key, mesh):
 
     return plot_data_list, norm, mappable, bounds, config
 
+
+def _summarize_profile_timeseries(
+    velocity_series,
+    mesh,
+    config_key,
+    velocity_name,
+    output_dir,
+    base_filename_prefix,
+    suffix=None,
+    extra_fields=None,
+    write_csv=True,
+):
+    """
+    Compute min/max/std per X-profile using raw time-series values (before averaging).
+    """
+    if velocity_series is None:
+        return []
+
+    config = PLOT_STYLES.get(config_key, {})
+    x_profiles = config.get('x_profile_m_list', [15.0, 30.0, 45.0])
+    x_tol = config.get('x_tolerance_m', 0.5)
+    labels = _profile_labels_from_config(config)
+
+    mesh_points = mesh.points
+    node_x_coords = mesh_points[:, 0]
+
+    rows = []
+    print(f"\nProfile time-series statistics for {velocity_name}:")
+    for idx, x_profile in enumerate(x_profiles):
+        label = labels[idx] if idx < len(labels) else None
+        profile_mask = (node_x_coords >= (x_profile - x_tol)) & (node_x_coords <= (x_profile + x_tol))
+        num_nodes = np.sum(profile_mask)
+        if num_nodes == 0:
+            print(f"  X={x_profile} m → no nodes in slice (skipped)")
+            continue
+
+        vals = np.asarray(velocity_series)[:, profile_mask].ravel()
+        finite_vals = vals[np.isfinite(vals)]
+        if finite_vals.size == 0:
+            print(f"  X={x_profile} m → no finite values (skipped)")
+            continue
+
+        v_min = float(np.min(finite_vals))
+        v_max = float(np.max(finite_vals))
+        v_std = float(np.std(finite_vals))
+        v_mean = float(np.mean(finite_vals))
+        v_cv = float(v_std / v_mean) if v_mean != 0 else np.nan
+        prefix = f"[{label}] " if label else ""
+        print(f"  {prefix}X={x_profile} m → min={v_min:.4f}, max={v_max:.4f}, std={v_std:.4f}, mean={v_mean:.4f}, cv={v_cv:.4f}")
+
+        row = {
+            "profile_label": label if label is not None else "",
+            "x_profile_m": x_profile,
+            "min": v_min,
+            "max": v_max,
+            "std": v_std,
+            "mean": v_mean,
+            "cv": v_cv,
+            "n_points": int(finite_vals.size)
+        }
+        if isinstance(extra_fields, dict):
+            row.update(extra_fields)
+        rows.append(row)
+
+    if not rows:
+        return []
+
+    df = pd.DataFrame(rows)
+    if "season" in df.columns:
+        df = df.sort_values(["season", "x_profile_m"])
+    else:
+        df = df.sort_values("x_profile_m")
+    df = _reorder_stat_columns(df)
+    stats_suffix = f"_{suffix}" if suffix else ""
+    csv_name = f"{base_filename_prefix}_profile_stats{stats_suffix}.csv"
+    csv_path = os.path.join(output_dir, csv_name)
+    if write_csv:
+        try:
+            df.to_csv(csv_path, index=False)
+            print(f"Saved profile time-series statistics to {os.path.abspath(csv_path)}")
+        except Exception as exc:
+            print(f"Warning: Failed to save profile time-series stats CSV ({csv_name}): {exc}")
+
+    return rows
+
+
 # MODIFICATION: New helper to plot 2D part
 def _plot_heatmap_2d(fig, axes, plot_data_list, mappable, velocity_name, config, add_cbar=True):
     """
@@ -706,8 +1060,6 @@ def _plot_heatmap_2d(fig, axes, plot_data_list, mappable, velocity_name, config,
         )
         # ax_2d_current.set_xlabel('Y-Coordinate (Width) [m]') # MODIFICATION: Removed
         # ax_2d_current.set_ylabel('Z-Coordinate (Vertical) [m]') # MODIFICATION: Removed
-        if add_cbar:
-            fig.colorbar(c, ax=ax_2d_current, label=f'Average {velocity_name}')
 
 # MODIFICATION: New helper to plot 3D part
 def _plot_heatmap_3d(fig, ax, plot_data_list, mappable, bounds, config, velocity_name, add_colorbar=True):
@@ -759,9 +1111,12 @@ def _plot_heatmap_3d(fig, ax, plot_data_list, mappable, bounds, config, velocity
     ) 
     if add_colorbar:
         fig.colorbar(
-            mappable, ax=ax, 
-            shrink=config.get('colorbar_shrink', 0.6), 
-            aspect=config.get('colorbar_aspect', 15), 
+            mappable,
+            ax=ax,
+            shrink=config.get('colorbar_shrink', 0.85),
+            aspect=config.get('colorbar_aspect', 25),
+            fraction=config.get('colorbar_fraction', 0.04),
+            pad=config.get('colorbar_pad', 0.08),
             label=f'Average {velocity_name}'
         )
 
@@ -929,7 +1284,10 @@ def _plot_seasonal_heatmap_grid(
     mappable,
     output_dir,
     base_filename_prefix,
-    suffix="SeasonalGrid"
+    suffix="SeasonalGrid",
+    mask_options=None,
+    mask_overlay_data=None,
+    apply_mask=False
 ):
     if not seasonal_plot_data:
         print("No seasonal data available for seasonal grid plot.")
@@ -946,11 +1304,25 @@ def _plot_seasonal_heatmap_grid(
         figsize=(4.5 * num_seasons, 3.6 * num_profiles),
         squeeze=False
     )
+    fig._skip_tight_layout = True
+    fig.subplots_adjust(left=0.07, right=0.88, top=0.93, bottom=0.08, wspace=0.25, hspace=0.25)
+
+    mask_options = mask_options or {}
+    mask_thresh = mask_options.get('threshold', 0.12)
+    mask_color = mask_options.get('color', '#ff0000')
+    mask_linewidth = mask_options.get('linewidth', 1.5)
+    mask_linestyle = mask_options.get('linestyle', '--')
+    mask_alpha = mask_options.get('alpha', 0.8)
+    apply_mask = apply_mask and mask_thresh is not None
+    mask_warning_logged = set()
 
     for col, season_key in enumerate(season_order):
         season_label = SEASON_DISPLAY_NAMES.get(season_key, season_key.title())
         axes[0, col].set_title(season_label)
         season_data_list = seasonal_plot_data.get(season_key)
+        overlay_list = None
+        if mask_overlay_data and season_key in mask_overlay_data:
+            overlay_list = mask_overlay_data.get(season_key)
 
         for row in range(num_profiles):
             ax = axes[row, col]
@@ -964,6 +1336,43 @@ def _plot_seasonal_heatmap_grid(
                     aspect='auto',
                     norm=mappable.norm
                 )
+                label_index = row
+                if label_index < 26:
+                    label = "(" + chr(ord('a') + label_index) + ")"
+                else:
+                    label = f"({label_index+1})"
+                ax.text(
+                    0.03,
+                    0.95,
+                    label,
+                    transform=ax.transAxes,
+                    fontsize=plt.rcParams.get('axes.labelsize', 12),
+                    fontweight='bold',
+                    ha='left',
+                    va='top',
+                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=2)
+                )
+                if apply_mask:
+                    mask_source_list = overlay_list if overlay_list is not None else season_data_list
+                    if mask_source_list and row < len(mask_source_list):
+                        mask_source = mask_source_list[row]
+                        mask_array = _extract_largest_region_mask(mask_source['grid_vel'], mask_thresh)
+                    else:
+                        mask_array = None
+                    if mask_array is not None:
+                        ax.contour(
+                            mask_source['grid_y'],
+                            mask_source['grid_z'],
+                            mask_array.astype(float),
+                            levels=[0.5],
+                            colors=mask_color,
+                            linewidths=mask_linewidth,
+                            linestyles=mask_linestyle,
+                            alpha=mask_alpha
+                        )
+                    elif overlay_list is not None and season_key not in mask_warning_logged:
+                        print(f"Warning: Seasonal mask data missing for season '{season_key}'.")
+                        mask_warning_logged.add(season_key)
                 if col == 0:
                     ax.set_ylabel('Z (Vertical) [m]')
                 if row == num_profiles - 1:
@@ -971,16 +1380,13 @@ def _plot_seasonal_heatmap_grid(
             else:
                 ax.axis('off')
 
-    fig.subplots_adjust(wspace=0.25, hspace=0.3)
-
     scalar_mappable = plt.cm.ScalarMappable(cmap=mappable.cmap, norm=mappable.norm)
     scalar_mappable.set_array([])
+    cbar_ax = fig.add_axes([0.9, 0.12, 0.02, 0.76])
     fig.colorbar(
         scalar_mappable,
-        ax=axes.ravel().tolist(),
-        label=f'Average {velocity_name}',
-        fraction=0.015,
-        pad=0.02
+        cax=cbar_ax,
+        label=f'Average {velocity_name}'
     )
 
     save_plot_png(fig, output_dir, f"{base_filename_prefix}_{suffix}")
@@ -1008,7 +1414,7 @@ def _shift_z_for_visual(plot_data_list, bounds, z_offset):
 
 # --- Task-specific wrappers for the generic plotter ---
 
-def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
+def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix, th_results=None):
     """
     Task 5 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vy.
@@ -1035,15 +1441,34 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
         print("Task 5: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
 
+    profile_labels = _profile_labels_from_config(config)
+    _summarize_heatmap_profiles(
+        plot_data_list,
+        velocity_name,
+        output_dir,
+        base_filename_prefix,
+        x_profile_labels=profile_labels
+    )
+
     num_profiles = len(plot_data_list)
     axes_list_flat = [] # To store flattened axes
 
     # 2. Generate and save individual 2D plot
     try:
-        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10, 8 * num_profiles), squeeze=False)
+        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10.5, 8 * num_profiles), squeeze=False)
         axes_list_flat = axes_2d.flatten()
         # MODIFICATION: Call with add_cbar=True
-        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=True)
+        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=False)
+        scalar_map = plt.cm.ScalarMappable(cmap=mappable.cmap, norm=mappable.norm)
+        scalar_map.set_array([])
+        fig_2d.colorbar(
+            scalar_map,
+            ax=axes_list_flat,
+            orientation='vertical',
+            fraction=0.025,
+            pad=0.02,
+            label=f'Average {velocity_name}'
+        )
         
         # MODIFICATION: Add shared labels for the individual 2D plot
         axes_list_flat[-1].set_xlabel('Y (Width) [m]')
@@ -1064,6 +1489,14 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 5 3D plot: {e}")
@@ -1075,6 +1508,16 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
     )
 
     # 5. Generate seasonal grid (new visualization)
+    mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+    mask_overlay = None
+    apply_mask = mask_config.get('enabled', False)
+    if apply_mask and th_results is not None:
+        mask_overlay = _build_seasonal_mask_overlay(th_results, mesh)
+        if not mask_overlay:
+            print("Warning: Seasonal mask overlay requested but TH data unavailable.")
+
+    dsl_metrics_out = {}
+
     if seasonal_avgs:
         seasonal_plot_data = {}
         for season_key, season_avg in seasonal_avgs.items():
@@ -1100,10 +1543,350 @@ def plot_task_5_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=mask_overlay,
+                apply_mask=apply_mask and bool(mask_overlay)
             )
+            seasonal_rows = []
+            seasonal_series = results.get("seasonal_series", {})
+            for season_key, season_plot_data in seasonal_plot_data.items():
+                series = seasonal_series.get(season_key)
+                if series is None:
+                    continue
+                rows = _summarize_profile_timeseries(
+                    series,
+                    mesh,
+                    config_key,
+                    f"{velocity_name} ({season_key})",
+                    output_dir,
+                    base_filename_prefix,
+                    extra_fields={"season": season_key},
+                    suffix="seasonal",
+                    write_csv=False
+                )
+                if rows:
+                    seasonal_rows.extend(rows)
+            if seasonal_rows:
+                df_seasonal = pd.DataFrame(seasonal_rows).sort_values(["season", "x_profile_m"])
+                csv_name = f"{base_filename_prefix}_profile_stats_seasonal.csv"
+                csv_path = os.path.join(output_dir, csv_name)
+                try:
+                    df_seasonal.to_csv(csv_path, index=False)
+                    print(f"Saved seasonal profile time-series statistics to {os.path.abspath(csv_path)}")
+                except Exception as exc:
+                    print(f"Warning: Failed to save seasonal profile time-series stats CSV ({csv_name}): {exc}")
 
-def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
+
+def plot_task7_summer_combined(results_cache, mesh_cache, veg_order, output_dir, base_filename_prefix):
+    """
+    Combined summer Y-Z heatmaps for four vegetation folders across all configured X profiles.
+    Adds a red contour line at TH=0.12. Layout matches seasonal grid sizing:
+    rows = profiles, cols = vegetation folders (profiles by column request).
+    """
+    desired_order = ["naturalgrass", "arablecrop", "exoticshrub", "exoticgrass"]
+    veg_order = [v for v in desired_order if v in veg_order] + [v for v in veg_order if v not in desired_order]
+    config_key = "TASK7_HEATMAP_CONFIG"
+    config = PLOT_STYLES.get(config_key, {})
+    x_profiles = config.get('x_profile_m_list', [])
+    x_tol = config.get('x_tolerance_m', 0.5)
+    labels = _profile_labels_from_config(config)
+
+    if not x_profiles:
+        print("Warning: Task 7 combined plot skipped (no x_profile_m_list configured).")
+        return
+
+    rows = len(x_profiles)   # profiles as rows
+    cols = len(veg_order)    # vegetation as columns
+    figsize = (4.5 * cols, 3.6 * rows)  # align with seasonal grid sizing
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+    fig._skip_tight_layout = True
+    fig.subplots_adjust(left=0.07, right=0.88, top=0.93, bottom=0.08, wspace=0.25, hspace=0.25)
+
+    any_plotted = False
+    first_mappable = None
+
+    label_fontsize = plt.rcParams.get('axes.labelsize', 12)
+
+    for col, veg in enumerate(veg_order):
+        task7_res = results_cache.get(veg)
+        mesh = mesh_cache.get(veg)
+        if task7_res is None or mesh is None:
+            print(f"Warning: Missing Task 7 data or mesh for {veg}. Skipping row.")
+            continue
+
+        summer_avg = task7_res.get("seasonal", {}).get("summer")
+        if summer_avg is None:
+            print(f"Warning: No summer data for {veg}. Skipping row.")
+            continue
+
+        plot_data_list, norm, mappable, bounds, _ = _calculate_heatmap_data(
+            summer_avg, "TH", config_key, mesh
+        )
+        if not plot_data_list:
+            print(f"Warning: No plot data for {veg} summer. Skipping row.")
+            continue
+
+        first_mappable = first_mappable or plt.cm.ScalarMappable(norm=norm, cmap=mappable.cmap)
+
+        for row, x_target in enumerate(x_profiles):
+            ax = axes[row][col]
+            label = labels[row] if row < len(labels) else ""
+            pd_match = None
+            for pd in plot_data_list:
+                if abs(pd.get('x_profile', 0) - x_target) <= x_tol + 1e-6:
+                    pd_match = pd
+                    break
+
+            if pd_match is None:
+                ax.set_axis_off()
+                ax.set_title(f"{veg} (X={x_target}m) missing")
+                continue
+
+            im = ax.imshow(
+                pd_match['grid_vel'],
+                extent=[pd_match['y_min'], pd_match['y_max'], pd_match['z_min'], pd_match['z_max']],
+                origin='lower',
+                cmap=mappable.cmap,
+                norm=mappable.norm,
+                aspect='auto'
+            )
+            try:
+                ax.contour(
+                    pd_match['grid_y'],
+                    pd_match['grid_z'],
+                    pd_match['grid_vel'],
+                    levels=[0.12],
+                    colors=['red'],
+                    linewidths=1.3,
+                )
+            except Exception as exc:
+                print(f"Warning: Failed to draw 0.12 contour for {veg} X={x_target}: {exc}")
+
+            if row == 0:
+                ax.set_title(f"{veg}", fontsize=label_fontsize, fontweight='bold')
+            if col == 0:
+                ax.set_ylabel("")
+            # Remove axis-label text, keep ticks
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            any_plotted = True
+
+    if not any_plotted:
+        plt.close(fig)
+        print("Warning: Summer combined plot not generated (no data).")
+        return
+
+    if first_mappable is not None:
+        label_fontsize = plt.rcParams.get('axes.labelsize', 12)
+        cbar = fig.colorbar(first_mappable, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
+        cbar.set_label("Average TH (summer)", fontsize=label_fontsize)
+
+    save_plot_png(fig, output_dir, f"{base_filename_prefix}_plot")
+
+
+def plot_task7_date_combined(date_cache, veg_order, output_dir, base_filename_prefix, target_date):
+    """
+    Combined TH Y-Z heatmaps for a specific date across vegetation folders.
+    Layout: profiles as rows, vegetation as columns (naturalgrass, arablecrop, exoticshrub, exoticgrass).
+    """
+    config_key = "TASK7_HEATMAP_CONFIG"
+    config = PLOT_STYLES.get(config_key, {})
+    x_profiles = config.get('x_profile_m_list', [])
+    x_tol = config.get('x_tolerance_m', 0.5)
+    labels = _profile_labels_from_config(config)
+
+    if not x_profiles:
+        print("Warning: Task 7 date combined plot skipped (no x_profile_m_list configured).")
+        return
+
+    rows = len(x_profiles)
+    cols = len(veg_order)
+    figsize = (4.5 * cols, 3.6 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+    fig._skip_tight_layout = True
+    fig.subplots_adjust(left=0.07, right=0.88, top=0.93, bottom=0.08, wspace=0.25, hspace=0.25)
+
+    any_plotted = False
+    first_mappable = None
+    label_fontsize = plt.rcParams.get('axes.labelsize', 12)
+
+    for col, veg in enumerate(veg_order):
+        entry = date_cache.get(veg)
+        if not entry:
+            print(f"Warning: Missing date-specific data for {veg}. Skipping column.")
+            continue
+        th_slice = entry.get("th_slice")
+        mesh = entry.get("mesh")
+        if th_slice is None or mesh is None:
+            print(f"Warning: Incomplete data for {veg}. Skipping column.")
+            continue
+
+        plot_data_list, norm, mappable, bounds, _ = _calculate_heatmap_data(
+            th_slice, "TH", config_key, mesh
+        )
+        if not plot_data_list:
+            print(f"Warning: No plot data for {veg} at date {target_date}.")
+            continue
+
+        first_mappable = first_mappable or plt.cm.ScalarMappable(norm=norm, cmap=mappable.cmap)
+
+        for row, x_target in enumerate(x_profiles):
+            ax = axes[row][col]
+            label = labels[row] if row < len(labels) else ""
+            pd_match = None
+            for pd in plot_data_list:
+                if abs(pd.get('x_profile', 0) - x_target) <= x_tol + 1e-6:
+                    pd_match = pd
+                    break
+
+            if pd_match is None:
+                ax.set_axis_off()
+                continue
+
+            ax.imshow(
+                pd_match['grid_vel'],
+                extent=[pd_match['y_min'], pd_match['y_max'], pd_match['z_min'], pd_match['z_max']],
+                origin='lower',
+                cmap=mappable.cmap,
+                norm=mappable.norm,
+                aspect='auto'
+            )
+            try:
+                ax.contour(
+                    pd_match['grid_y'],
+                    pd_match['grid_z'],
+                    pd_match['grid_vel'],
+                    levels=[0.12],
+                    colors=['red'],
+                    linewidths=1.3
+                )
+            except Exception as exc:
+                print(f"Warning: Failed to draw 0.12 contour for {veg} X={x_target}: {exc}")
+
+            if row == 0:
+                ax.set_title(f"{veg}", fontsize=label_fontsize, fontweight='bold')
+            if col == 0:
+                ax.set_ylabel("")
+            ax.set_xlabel("")
+            any_plotted = True
+
+    if not any_plotted:
+        plt.close(fig)
+        print("Warning: Date combined plot not generated (no data).")
+        return
+
+    if first_mappable is not None:
+        cbar = fig.colorbar(first_mappable, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
+        cbar.set_label(f"TH on {target_date}", fontsize=label_fontsize)
+
+    save_plot_png(fig, output_dir, f"{base_filename_prefix}_plot")
+
+def plot_profiles_on_date(
+    th_data,
+    vy_data,
+    vz_data,
+    mesh,
+    dates,
+    target_date,
+    output_dir,
+    base_filename_prefix
+):
+    """
+    Visualize TH/Vy/Vz on a specific date across configured X profiles (rows) and variables (columns).
+    Style matches Task 7 combined plot. Uses TH contour at 0.12.
+    """
+    date_index = None
+    try:
+        date_index = list(pd.to_datetime(dates)).index(pd.to_datetime(target_date))
+    except Exception:
+        try:
+            dt_series = pd.to_datetime(dates)
+            matches = np.where(dt_series == pd.to_datetime(target_date))[0]
+            if len(matches) > 0:
+                date_index = int(matches[0])
+        except Exception:
+            date_index = None
+    if date_index is None:
+        print(f"Error: target date {target_date} not found in dates.")
+        return
+
+    config_th = PLOT_STYLES.get("TASK7_HEATMAP_CONFIG", {})
+    config_vy = PLOT_STYLES.get("TASK5_HEATMAP_CONFIG", {})
+    config_vz = PLOT_STYLES.get("TASK6_HEATMAP_CONFIG", {})
+
+    x_profiles = config_th.get('x_profile_m_list', [])
+    x_tol = config_th.get('x_tolerance_m', 0.5)
+    labels = _profile_labels_from_config(config_th)
+
+    rows = len(x_profiles)
+    cols = 3  # TH, Vy, Vz
+    figsize = (4.5 * cols, 3.6 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+    fig._skip_tight_layout = True
+    fig.subplots_adjust(left=0.07, right=0.88, top=0.93, bottom=0.08, wspace=0.25, hspace=0.25)
+
+    data_map = [
+        ("TH", th_data[date_index], "TASK7_HEATMAP_CONFIG", config_th, "Average TH"),
+        ("Vy", vy_data[date_index] if vy_data is not None else None, "TASK5_HEATMAP_CONFIG", config_vy, "Average Vy [m/day]"),
+        ("Vz", vz_data[date_index] if vz_data is not None else None, "TASK6_HEATMAP_CONFIG", config_vz, "Average Vz [m/day]"),
+    ]
+
+    mappables = []
+    for col, (name, values, cfg_key, cfg, label_text) in enumerate(data_map):
+        if values is None:
+            continue
+        plot_data_list, norm, mappable, bounds, _ = _calculate_heatmap_data(values, name, cfg_key, mesh)
+        mappables.append(mappable)
+        x_tol_local = cfg.get('x_tolerance_m', x_tol)
+        for row, x_target in enumerate(x_profiles):
+            ax = axes[row][col]
+            label = labels[row] if row < len(labels) else ""
+            pd_match = None
+            for pd in plot_data_list:
+                if abs(pd.get('x_profile', 0) - x_target) <= x_tol_local + 1e-6:
+                    pd_match = pd
+                    break
+            if pd_match is None:
+                ax.set_axis_off()
+                continue
+            ax.imshow(
+                pd_match['grid_vel'],
+                extent=[pd_match['y_min'], pd_match['y_max'], pd_match['z_min'], pd_match['z_max']],
+                origin='lower',
+                cmap=mappable.cmap,
+                norm=mappable.norm,
+                aspect='auto'
+            )
+            if name == "TH":
+                try:
+                    ax.contour(
+                        pd_match['grid_y'],
+                        pd_match['grid_z'],
+                        pd_match['grid_vel'],
+                        levels=[0.12],
+                        colors=['red'],
+                        linewidths=1.3
+                    )
+                except Exception as exc:
+                    print(f"Warning: Failed to draw 0.12 contour for X={x_target}: {exc}")
+
+            if row == 0:
+                ax.set_title(f"{label_text}", fontsize=12, fontweight='bold')
+            if col == 0:
+                ax.set_ylabel("")
+            ax.set_xlabel("")
+
+    # Shared colorbars per column
+    for col, (name, _, _, label_text) in enumerate(data_map):
+        if col >= len(mappables):
+            continue
+        cbar = fig.colorbar(mappables[col], ax=axes[:, col], fraction=0.03, pad=0.02)
+        cbar.set_label(label_text, fontsize=plt.rcParams.get('axes.labelsize', 12))
+
+    save_plot_png(fig, output_dir, f"{base_filename_prefix}_plot")
+
+def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix, th_results=None):
     """
     Task 6 specific wrapper.
     Generates 2D, 3D, and Combined plots for average Vz.
@@ -1130,15 +1913,33 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
         print("Task 6: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
 
+    profile_labels = _profile_labels_from_config(config)
+    _summarize_heatmap_profiles(
+        plot_data_list,
+        velocity_name,
+        output_dir,
+        base_filename_prefix,
+        x_profile_labels=profile_labels
+    )
+
     num_profiles = len(plot_data_list)
     axes_list_flat = []
 
     # 2. Generate and save individual 2D plot
     try:
-        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10, 8 * num_profiles), squeeze=False)
+        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10.5, 8 * num_profiles), squeeze=False)
         axes_list_flat = axes_2d.flatten()
-        # MODIFICATION: Call with add_cbar=True
-        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=True)
+        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=False)
+        scalar_map = plt.cm.ScalarMappable(cmap=mappable.cmap, norm=mappable.norm)
+        scalar_map.set_array([])
+        fig_2d.colorbar(
+            scalar_map,
+            ax=axes_list_flat,
+            orientation='vertical',
+            fraction=0.025,
+            pad=0.02,
+            label=f'Average {velocity_name}'
+        )
         
         # MODIFICATION: Add shared labels for the individual 2D plot
         axes_list_flat[-1].set_xlabel('Y (Width) [m]')
@@ -1159,6 +1960,14 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 6 3D plot: {e}")
@@ -1168,6 +1977,14 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
         plot_data_list, mappable, bounds, config, velocity_name,
         output_dir, base_filename_prefix
     )
+
+    mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+    mask_overlay = None
+    apply_mask = mask_config.get('enabled', False)
+    if apply_mask and th_results is not None:
+        mask_overlay = _build_seasonal_mask_overlay(th_results, mesh)
+        if not mask_overlay:
+            print("Warning: Seasonal mask overlay requested but TH data unavailable.")
 
     if seasonal_avgs:
         seasonal_plot_data = {}
@@ -1194,8 +2011,39 @@ def plot_task_6_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=mask_overlay,
+                apply_mask=apply_mask and bool(mask_overlay)
             )
+            seasonal_rows = []
+            seasonal_series = results.get("seasonal_series", {})
+            for season_key, season_plot_data in seasonal_plot_data.items():
+                series = seasonal_series.get(season_key)
+                if series is None:
+                    continue
+                rows = _summarize_profile_timeseries(
+                    series,
+                    mesh,
+                    config_key,
+                    f"{velocity_name} ({season_key})",
+                    output_dir,
+                    base_filename_prefix,
+                    extra_fields={"season": season_key},
+                    suffix="seasonal",
+                    write_csv=False
+                )
+                if rows:
+                    seasonal_rows.extend(rows)
+            if seasonal_rows:
+                df_seasonal = pd.DataFrame(seasonal_rows).sort_values(["season", "x_profile_m"])
+                csv_name = f"{base_filename_prefix}_profile_stats_seasonal.csv"
+                csv_path = os.path.join(output_dir, csv_name)
+                try:
+                    df_seasonal.to_csv(csv_path, index=False)
+                    print(f"Saved seasonal profile time-series statistics to {os.path.abspath(csv_path)}")
+                except Exception as exc:
+                    print(f"Warning: Failed to save seasonal profile time-series stats CSV ({csv_name}): {exc}")
 
 def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     """
@@ -1214,6 +2062,10 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
         return
     seasonal_avgs = results.get("seasonal", {})
     season_order = results.get("season_order", SEASON_ORDER_DEFAULT)
+    task7_config = PLOT_STYLES.get("TASK7_HEATMAP_CONFIG", {})
+    theta_fc = task7_config.get('theta_fc')
+    sdi_sw_s = task7_config.get('sdi_sw_s', 0.12)
+    sdi_sw_h = task7_config.get('sdi_sw_h', 0.085)
     
     # 1. Calculate data
     (plot_data_list, norm, mappable, bounds, config) = _calculate_heatmap_data(
@@ -1224,15 +2076,33 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
         print("Task 7: No data calculated. Skipping all plots.")
         return # Exit if calculation failed
 
+    profile_labels = _profile_labels_from_config(config)
+    _summarize_heatmap_profiles(
+        plot_data_list,
+        velocity_name,
+        output_dir,
+        base_filename_prefix,
+        x_profile_labels=profile_labels
+    )
+
     num_profiles = len(plot_data_list)
     axes_list_flat = []
 
     # 2. Generate and save individual 2D plot
     try:
-        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10, 8 * num_profiles), squeeze=False)
+        fig_2d, axes_2d = plt.subplots(num_profiles, 1, figsize=(10.5, 8 * num_profiles), squeeze=False)
         axes_list_flat = axes_2d.flatten()
-        # MODIFICATION: Call with add_cbar=True
-        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=True)
+        _plot_heatmap_2d(fig_2d, axes_list_flat, plot_data_list, mappable, velocity_name, config, add_cbar=False)
+        scalar_map = plt.cm.ScalarMappable(cmap=mappable.cmap, norm=mappable.norm)
+        scalar_map.set_array([])
+        fig_2d.colorbar(
+            scalar_map,
+            ax=axes_list_flat,
+            orientation='vertical',
+            fraction=0.025,
+            pad=0.02,
+            label=f'Average {velocity_name}'
+        )
         
         # MODIFICATION: Add shared labels for the individual 2D plot
         axes_list_flat[-1].set_xlabel('Y (Width) [m]')
@@ -1253,6 +2123,14 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
         fig_3d = plt.figure(figsize=config.get('figsize', (18, 12)))
         ax_3d = fig_3d.add_subplot(111, projection='3d')
         _plot_heatmap_3d(fig_3d, ax_3d, plot_data_list, mappable, bounds, config, velocity_name)
+        pos = ax_3d.get_position()
+        ax_3d.set_position([
+            pos.x0 - 0.02,
+            pos.y0 - 0.02,
+            pos.width + 0.06,
+            pos.height + 0.06
+        ])
+        ax_3d.dist = min(getattr(ax_3d, "dist", 10), 9)
         save_plot_png(fig_3d, output_dir, f"{base_filename_prefix}_plot_3D") # Saves and closes
     except Exception as e:
         print(f"Error generating Task 7 3D plot: {e}")
@@ -1280,6 +2158,7 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 seasonal_plot_data[season_key] = season_plot_data
 
         if seasonal_plot_data:
+            mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
             _plot_seasonal_heatmap_grid(
                 seasonal_plot_data,
                 season_order,
@@ -1288,6 +2167,45 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mappable,
                 output_dir,
                 base_filename_prefix,
-                suffix="SeasonalGrid"
+                suffix="SeasonalGrid",
+                mask_options=mask_config,
+                mask_overlay_data=None,
+                apply_mask=mask_config.get('enabled', False)
             )
+            threshold = mask_config.get('threshold', 0.12)
+            for season_key, pdata_list in seasonal_plot_data.items():
+                metrics = _compute_dsl_metrics_from_plot_data(pdata_list, threshold, season_key=season_key)
+                if metrics:
+                    dsl_metrics_out[season_key] = metrics
+            seasonal_rows = []
+            seasonal_series = results.get("seasonal_series", {})
+            for season_key, season_plot_data in seasonal_plot_data.items():
+                series = seasonal_series.get(season_key)
+                if series is None:
+                    continue
+                rows = _summarize_profile_timeseries(
+                    series,
+                    mesh,
+                    config_key,
+                    f"{velocity_name} ({season_key})",
+                    output_dir,
+                    base_filename_prefix,
+                    extra_fields={"season": season_key},
+                    suffix="seasonal",
+                    write_csv=False
+                )
+                if rows:
+                    seasonal_rows.extend(rows)
+            if seasonal_rows:
+                df_seasonal = pd.DataFrame(seasonal_rows).sort_values(["season", "x_profile_m"])
+                csv_name = f"{base_filename_prefix}_profile_stats_seasonal.csv"
+                csv_path = os.path.join(output_dir, csv_name)
+                try:
+                    df_seasonal.to_csv(csv_path, index=False)
+                    print(f"Saved seasonal profile time-series statistics to {os.path.abspath(csv_path)}")
+                except Exception as exc:
+                    print(f"Warning: Failed to save seasonal profile time-series stats CSV ({csv_name}): {exc}")
 
+    if dsl_metrics_out:
+        return dsl_metrics_out
+    return None

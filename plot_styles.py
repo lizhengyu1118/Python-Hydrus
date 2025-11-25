@@ -55,14 +55,14 @@ TASK5_HEATMAP_CONFIG = {
     'x_tolerance_m': 0.05,
     
     # Resolution of the interpolation grid
-    'grid_resolution_y': 100,
-    'grid_resolution_z': 100,
+    'grid_resolution_y': 200,
+    'grid_resolution_z': 200,
     
     # Colormap for the heatmap (e.g., 'coolwarm', 'viridis', 'jet')
     'cmap': 'coolwarm',
     
     # 3D Plotting Parameters
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -95,12 +95,12 @@ TASK5_HEATMAP_CONFIG = {
 # --- Task 6 (Vz) Heatmap Configuration ---
 TASK6_HEATMAP_CONFIG = {
     'x_profile_m_list': [-15.0, 0, 15.0],
-    'x_tolerance_m': 0.5,
-    'grid_resolution_y': 100,
-    'grid_resolution_z': 100,
+    'x_tolerance_m': 0.05,
+    'grid_resolution_y': 200,
+    'grid_resolution_z': 200,
     # Different colormap for Vz
     'cmap': 'viridis', 
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -131,11 +131,11 @@ TASK6_HEATMAP_CONFIG = {
 TASK7_HEATMAP_CONFIG = {
     'x_profile_m_list': [-15.0, 0, 15.0],
     'x_tolerance_m': 0.05,
-    'grid_resolution_y': 100,
-    'grid_resolution_z': 100,
+    'grid_resolution_y': 200,
+    'grid_resolution_z': 200,
     # Different colormap for TH
     'cmap': 'Blues', 
-    'figsize': (27, 18),
+    'figsize': (7.2, 5.5),
     'view_elevation': 25,
     'view_azimuth': -75,
     'colorbar_shrink': 0.6,
@@ -157,7 +157,21 @@ TASK7_HEATMAP_CONFIG = {
     'subplot_label_alignment_3d': {'ha': 'center', 'va': 'bottom'},
     'subplot_label_z_offset_ratio': 0.05,
 
-    'manual_color_limits': None
+    'manual_color_limits': None,
+    # Water deficit and SDI parameters
+    'theta_fc': None,       # Optional field capacity for deficit (set per soil)
+    'sdi_sw_s': 0.12,       # Stable water content
+    'sdi_sw_h': 0.085       # Permanent wilting point
+}
+TASK7_HEATMAP_CONFIG['theta_fc'] = 0.20
+
+SEASONAL_MASK_CONFIG = {
+    'enabled': True,
+    'threshold': 0.12,
+    'color': '#ff0000',
+    'linewidth': 2.0,
+    'linestyle': '-',
+    'alpha': 0.8
 }
 
 # Define a dictionary to hold all manual Y-axis limits.
@@ -241,7 +255,7 @@ def set_scientific_style(grid_alpha=0.5):
         'grid.alpha': grid_alpha,
         
         # MODIFICATION: Set savefig DPI
-        'savefig.dpi': 300
+        'savefig.dpi': 600
     })
     
     print("Applied global scientific plotting style (using seaborn-white base, Arial font).")

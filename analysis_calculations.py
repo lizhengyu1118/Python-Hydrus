@@ -63,6 +63,23 @@ def _calculate_seasonal_node_means(time_series_data, dates):
             seasonal_avgs[season_key] = np.mean(time_series_data[indices, :], axis=0)
 
     return seasonal_avgs
+
+
+def _season_indices(dates):
+    """
+    Returns a mapping of season_key -> list of timestep indices for that season.
+    """
+    indices = {key: [] for key in SEASON_KEYS}
+    if dates is None or len(dates) == 0:
+        return indices
+    datetime_index = pd.to_datetime(dates, errors='coerce')
+    for idx, dt in enumerate(datetime_index):
+        if pd.isna(dt):
+            continue
+        season_key = MONTH_TO_SEASON.get(dt.month)
+        if season_key:
+            indices[season_key].append(idx)
+    return indices
 # (None defined, tasks are self-contained)
 
 # --- I/O Helper Functions ---
@@ -530,11 +547,20 @@ def run_task_5_calculations(vy_data, dates=None):
     print("Calculating time-average Vy for all nodes...")
     try:
         avg_vy_all_nodes = np.mean(vy_data, axis=0)
-        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(vy_data), dates)
+        vy_arr = np.asarray(vy_data)
+        seasonal_indices = _season_indices(dates)
+        seasonal_avgs = _calculate_seasonal_node_means(vy_arr, dates)
+
+        seasonal_series = {}
+        for season_key, idx_list in seasonal_indices.items():
+            if idx_list:
+                seasonal_series[season_key] = vy_arr[idx_list, :]
+
         return {
             "overall": avg_vy_all_nodes,
             "seasonal": seasonal_avgs,
-            "season_order": SEASON_KEYS
+            "season_order": SEASON_KEYS,
+            "seasonal_series": seasonal_series
         }
     except Exception as e:
         print(f"Error calculating time-average Vy: {e}")
@@ -548,12 +574,21 @@ def run_task_6_calculations(vz_data, dates=None):
     """
     print("Calculating time-average Vz for all nodes...")
     try:
-        avg_vz_all_nodes = np.mean(vz_data, axis=0)
-        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(vz_data), dates)
+        vz_arr = np.asarray(vz_data)
+        avg_vz_all_nodes = np.mean(vz_arr, axis=0)
+        seasonal_indices = _season_indices(dates)
+        seasonal_avgs = _calculate_seasonal_node_means(vz_arr, dates)
+
+        seasonal_series = {}
+        for season_key, idx_list in seasonal_indices.items():
+            if idx_list:
+                seasonal_series[season_key] = vz_arr[idx_list, :]
+
         return {
             "overall": avg_vz_all_nodes,
             "seasonal": seasonal_avgs,
-            "season_order": SEASON_KEYS
+            "season_order": SEASON_KEYS,
+            "seasonal_series": seasonal_series
         }
     except Exception as e:
         print(f"Error calculating time-average Vz: {e}")
@@ -567,12 +602,21 @@ def run_task_7_calculations(th_data, dates=None):
     """
     print("Calculating time-average TH for all nodes...")
     try:
-        avg_th_all_nodes = np.mean(th_data, axis=0)
-        seasonal_avgs = _calculate_seasonal_node_means(np.asarray(th_data), dates)
+        th_arr = np.asarray(th_data)
+        avg_th_all_nodes = np.mean(th_arr, axis=0)
+        seasonal_indices = _season_indices(dates)
+        seasonal_avgs = _calculate_seasonal_node_means(th_arr, dates)
+
+        seasonal_series = {}
+        for season_key, idx_list in seasonal_indices.items():
+            if idx_list:
+                seasonal_series[season_key] = th_arr[idx_list, :]
+
         return {
             "overall": avg_th_all_nodes,
             "seasonal": seasonal_avgs,
-            "season_order": SEASON_KEYS
+            "season_order": SEASON_KEYS,
+            "seasonal_series": seasonal_series
         }
     except Exception as e:
         print(f"Error calculating time-average TH: {e}")

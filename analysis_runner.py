@@ -21,6 +21,7 @@ import sys
 import numpy as np
 import multiprocessing
 from datetime import datetime
+import pandas as pd
 
 # --- Module Imports ---
 
@@ -50,13 +51,14 @@ except ImportError:
 
 # 4. Styling & Configuration
 try:
-    from plot_styles import set_scientific_style
+    from plot_styles import set_scientific_style, SEASONAL_MASK_CONFIG
 except ImportError:
     print("Warning: 'plot_styles.py' not found.")
     print("Plots will use default matplotlib styling.")
     def set_scientific_style(grid_alpha=0.5):
         print("Using default plot style (plot_styles.py not found).")
         pass
+    SEASONAL_MASK_CONFIG = {"enabled": False}
 
 # 5. Email Notifier
 try:
@@ -76,6 +78,10 @@ SMTP_CONFIG = {
     "sender_password": "zcup lvjb ayre pxpd" 
 }
 RECIPIENT_EMAIL = "lizhengyu1118@gmail.com"
+
+# --- Optional fixed profile date for Task 7 per-folder visualization ---
+# Set to a string like "2013-06-02" to enable; set to None to disable.
+TASK7_PROFILE_DATE = "2012-04-07"
 
 # --- Helper Functions ---
 
@@ -225,6 +231,15 @@ def run_analysis():
     
     # --- MODIFICATION: Add cache for Task 8 ---
     global_results_cache = {}
+    # Cache Task 7 (TH) results per folder to avoid cross-folder reuse
+    task7_results_cache = {}
+    task7_dsl_cache = {}
+    # Cache meshes for cross-folder combined plots
+    mesh_cache = {}
+    # Cache date-specific TH slices for Task 7 when a fixed date is set
+    task7_date_cache = {}
+    # Cache Task 6 results for unified color scaling
+    task6_cache = {}
     # --- End MODIFICATION ---
     
     # 4. === MAIN FOLDER LOOP ===
@@ -321,6 +336,9 @@ def run_analysis():
         except Exception as e:
             print(f"Error during coordinate transformation: {e}")
             print("Continuing with original sloped geometry.")
+
+        # Cache the transformed mesh for potential cross-folder plots
+        mesh_cache[selected_folder_name] = mesh
 
         # 9. Get time-series data
         th_data = loader.get_data_by_name('TH')
@@ -437,7 +455,19 @@ def run_analysis():
                 if task5_results is None or task5_results.get("overall") is None:
                     print("Warning: Task 5 calculations returned no data. Skipping plotting.")
                     continue
-                plot.plot_task_5_heatmaps(task5_results, mesh, output_dir, base_filename_prefix)
+                th_mask_results = None
+                if SEASONAL_MASK_CONFIG.get('enabled', False):
+                    th_mask_results = task7_results_cache.get(selected_folder_name)
+                    if th_mask_results is None:
+                        th_mask_results = calc.run_task_7_calculations(th_data, dates)
+                        task7_results_cache[selected_folder_name] = th_mask_results
+                plot.plot_task_5_heatmaps(
+                    task5_results,
+                    mesh,
+                    output_dir,
+                    base_filename_prefix,
+                    th_mask_results
+                )
 
             # --- Task 6 Execution ---
             elif task_to_run == 6:
@@ -451,22 +481,161 @@ def run_analysis():
                 if task6_results is None or task6_results.get("overall") is None:
                     print("Warning: Task 6 calculations returned no data. Skipping plotting.")
                     continue
-                plot.plot_task_6_heatmaps(task6_results, mesh, output_dir, base_filename_prefix)
+                th_mask_results = None
+                if SEASONAL_MASK_CONFIG.get('enabled', False):
+                    th_mask_results = task7_results_cache.get(selected_folder_name)
+                    if th_mask_results is None:
+                        th_mask_results = calc.run_task_7_calculations(th_data, dates)
+                        task7_results_cache[selected_folder_name] = th_mask_results
+                # Cache for unified color limits; plot after loop
+                task6_cache[selected_folder_name] = {
+                    "results": task6_results,
+                    "mesh": mesh,
+                    "output_prefix": base_filename_prefix,
+                    "th_mask_results": th_mask_results
+                }
 
             # --- Task 7 Execution (NEW) ---
             elif task_to_run == 7:
                 print("\n--- Running Task 7 ---")
                 # TH data is already loaded and checked
                 
-                task7_results = calc.run_task_7_calculations(th_data, dates)
-                if task7_results is not None and task7_results.get("overall") is not None:
-                    plot.plot_task_7_heatmaps(task7_results, mesh, output_dir, base_filename_prefix)
+                if TASK7_PROFILE_DATE:
+                    # Use fixed date: store TH slice for later combined plotting
+                    try:
+                        dt_series = list(np.asarray(dates))
+                        dt_target = np.datetime64(TASK7_PROFILE_DATE)
+                        matches = [i for i, dt in enumerate(pd.to_datetime(dt_series, errors='coerce')) if dt == pd.to_datetime(TASK7_PROFILE_DATE)]
+                        if not matches:
+                            print(f"Warning: Target date {TASK7_PROFILE_DATE} not found for folder {selected_folder_name}. Skipping Task 7 for this folder.")
+                        else:
+                            idx = matches[0]
+                            task7_date_cache[selected_folder_name] = {
+                                "th_slice": th_data[idx],
+                                "mesh": mesh
+                            }
+                            print(f"Cached TH slice for {selected_folder_name} at date {TASK7_PROFILE_DATE} (index {idx}).")
+                    except Exception as e:
+                        print(f"Warning: Failed to cache date-specific data for {selected_folder_name}: {e}")
+                    # Skip seasonal plotting when a fixed date is specified
+                    continue
                 else:
-                    print("Warning: Task 7 calculations returned no data. Skipping plotting.")
+                    th_results = task7_results_cache.get(selected_folder_name)
+                    if th_results is None:
+                        th_results = calc.run_task_7_calculations(th_data, dates)
+                        task7_results_cache[selected_folder_name] = th_results
+                    if th_results is not None and th_results.get("overall") is not None:
+                        dsl_metrics = plot.plot_task_7_heatmaps(th_results, mesh, output_dir, base_filename_prefix)
+                        if dsl_metrics:
+                            task7_dsl_cache[selected_folder_name] = dsl_metrics
+                    else:
+                        print("Warning: Task 7 calculations returned no data. Skipping plotting.")
         
         print(f"\n--- Finished processing folder: {selected_folder_name} ---")
 
     print("\n--- All selected folders processed. ---")
+
+    # --- NEW: Plot Task 6 with unified color limits ---
+    if task6_cache:
+        try:
+            finite_vals = []
+            for entry in task6_cache.values():
+                overall = entry["results"].get("overall")
+                if overall is None:
+                    continue
+                arr = np.asarray(overall).ravel()
+                arr = arr[np.isfinite(arr)]
+                if arr.size:
+                    finite_vals.append(arr)
+
+            if finite_vals:
+                all_vals = np.concatenate(finite_vals)
+                mean_val = float(np.nanmean(all_vals))
+                std_val = float(np.nanstd(all_vals))
+                if std_val <= 0:
+                    pad = max(abs(mean_val) * 0.1, 1e-3)
+                    manual_limits = (mean_val - pad, mean_val + pad)
+                else:
+                    manual_limits = (mean_val - std_val, mean_val + std_val)
+            else:
+                manual_limits = (-1.0, 1.0)
+
+            # Apply to plotting config so all Task 6 plots share the same limits
+            if hasattr(plot, "PLOT_STYLES"):
+                cfg = plot.PLOT_STYLES.get("TASK6_HEATMAP_CONFIG", {})
+                cfg["manual_color_limits"] = manual_limits
+                plot.PLOT_STYLES["TASK6_HEATMAP_CONFIG"] = cfg
+                print(f"Task 6 unified color limits set to {manual_limits}")
+            for folder_name, entry in task6_cache.items():
+                plot.plot_task_6_heatmaps(
+                    entry["results"],
+                    entry["mesh"],
+                    output_dir,
+                    entry["output_prefix"],
+                    entry["th_mask_results"]
+                )
+        except Exception as e:
+            print(f"Warning: Failed to generate unified Task 6 plots: {e}")
+
+    # --- NEW: Task 7 combined outputs ---
+    if 7 in tasks_to_run:
+        if TASK7_PROFILE_DATE:
+            veg_order = ["naturalgrass", "arablecrop", "exoticshrub", "exoticgrass"]
+            missing = [v for v in veg_order if v not in task7_date_cache]
+            if missing:
+                print(f"Warning: Cannot generate date-specific combined plot (Task 7). Missing data for: {', '.join(missing)}")
+            else:
+                run_date_str = datetime.now().strftime('%Y%m%d')
+                base_prefix = f"{run_date_str}_ALL_Task7_DateProfiles_{TASK7_PROFILE_DATE.replace('-', '')}"
+                try:
+                    plot.plot_task7_date_combined(
+                        task7_date_cache,
+                        veg_order,
+                        output_dir,
+                        base_prefix,
+                        TASK7_PROFILE_DATE
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to generate Task 7 date combined plot: {e}")
+        else:
+            veg_order = ["exoticshrub", "exoticgrass", "arablecrop", "naturalgrass"]
+            missing = [v for v in veg_order if v not in task7_results_cache or v not in mesh_cache]
+            if missing:
+                print(f"Warning: Cannot generate summer combined plot (Task 7). Missing data for: {', '.join(missing)}")
+            else:
+                run_date_str = datetime.now().strftime('%Y%m%d')
+                base_prefix = f"{run_date_str}_ALL_Task7_SummerProfilesCombined"
+                try:
+                    plot.plot_task7_summer_combined(
+                        task7_results_cache,
+                        mesh_cache,
+                        veg_order,
+                        output_dir,
+                        base_prefix
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to generate Task 7 summer combined plot: {e}")
+                # Write DSL metrics combined CSV
+                combined_rows = []
+                for veg in veg_order:
+                    metrics = task7_dsl_cache.get(veg)
+                    if not metrics:
+                        continue
+                    for season_key, rows in metrics.items():
+                        for row in rows:
+                            out = dict(row)
+                            out["vegetation"] = veg
+                            combined_rows.append(out)
+                if combined_rows:
+                    df_comb = pd.DataFrame(combined_rows)
+                    cols_order = ["vegetation", "season", "profile_label", "x_profile_m", "dsl_area_frac", "dsl_centroid_y", "dsl_centroid_z"]
+                    df_comb = df_comb[[c for c in cols_order if c in df_comb.columns] + [c for c in df_comb.columns if c not in cols_order]]
+                    csv_path = os.path.join(output_dir, f"{run_date_str}_ALL_Task7_DSLMetrics.csv")
+                    try:
+                        df_comb.to_csv(csv_path, index=False)
+                        print(f"Saved combined DSL metrics to {csv_path}")
+                    except Exception as e:
+                        print(f"Warning: Failed to save combined DSL metrics CSV: {e}")
     
     # --- MODIFICATION: Task 8 Execution (After folder loop) ---
     if 8 in tasks_to_run:
