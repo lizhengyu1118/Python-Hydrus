@@ -79,7 +79,7 @@ def register_completion_notify(recipient_email, smtp_config, program_name=None):
         smtp_config (dict): A dictionary with SMTP server details.
             Expected keys:
             - 'server' (str): e.g., "smtp.gmail.com"
-            - 'port' (int): e.g., 465 (for SSL)
+            - 'port' (int): e.g., 587 (for SSL)
             - 'sender_email' (str): Your full email address.
             - 'sender_password' (str): Your email password or App Password.
                                       (App Password is required for Gmail/Google).

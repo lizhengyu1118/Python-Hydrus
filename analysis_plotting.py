@@ -9,6 +9,7 @@ It is called by 'analysis_runner.py'.
 """
 
 import os
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
@@ -48,45 +49,76 @@ def _reorder_stat_columns(df):
     return df[[c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]]
 
 
-def _compute_dsl_metrics_from_plot_data(plot_data_list, threshold, season_key=None):
+def _compute_dsl_metrics_from_plot_data(plot_data_list, threshold, season_key=None, depth_min=1.0):
     """
-    Compute dry-soil-layer metrics (area fraction and weighted centroid) on heatmap grids.
-    Uses grid values (already averaged for the season), not raw time series.
+    Compute dry-soil-layer metrics (area fraction, weighted centroid, thickness, and mean TH) on heatmap grids.
+    Dry layer mask = (depth >= depth_min) and (TH < threshold).
+    Uses grid values (already averaged for the season/date), not raw time series.
     """
     metrics = []
     for pd in plot_data_list:
         data = np.asarray(pd.get('grid_vel'))
         if data is None or data.size == 0:
             continue
-        mask = data < threshold
-        if not np.any(mask):
-            metrics.append({
-                "season": season_key,
-                "profile_label": "",
-                "x_profile_m": pd.get("x_profile"),
-                "dsl_area_frac": 0.0,
-                "dsl_centroid_y": np.nan,
-                "dsl_centroid_z": np.nan
-            })
-            continue
+
+        # Build z-coordinates with the same shape as data (unshifted values expected).
+        z_coords = pd.get('grid_z')
+        if z_coords is not None:
+            z_coords = np.asarray(z_coords)
+            if z_coords.shape != data.shape:
+                try:
+                    z_coords = np.broadcast_to(z_coords, data.shape)
+                except Exception:
+                    z_coords = None
+        if z_coords is None:
+            z_min, z_max = pd.get('z_min'), pd.get('z_max')
+            nz = data.shape[0]
+            if z_min is not None and z_max is not None and nz > 1:
+                z_axis = np.linspace(z_min, z_max, nz)
+                z_coords = np.repeat(z_axis[:, None], data.shape[1], axis=1)
+            else:
+                z_coords = np.full_like(data, np.nan, dtype=float)
 
         y_min, y_max = pd.get('y_min'), pd.get('y_max')
         z_min, z_max = pd.get('z_min'), pd.get('z_max')
-        ny, nz = data.shape[1], data.shape[0]
-        dy = 0.0 if ny <= 1 else (y_max - y_min) / (ny - 1)
-        dz = 0.0 if nz <= 1 else (z_max - z_min) / (nz - 1)
-        total_area = max(y_max - y_min, 0.0) * max(z_max - z_min, 0.0)
+        nz, ny = data.shape
+        dy = 0.0 if ny <= 1 or y_min is None or y_max is None else (y_max - y_min) / max(ny - 1, 1)
+        dz = 0.0 if nz <= 1 or z_min is None or z_max is None else (z_max - z_min) / max(nz - 1, 1)
         dA = dy * dz
-        area = float(mask.sum()) * dA
-        area_frac = float(area / total_area) if total_area > 0 else 0.0
 
-        weights = (threshold - data) * mask
+        # Compute depth from the surface using the coordinate closest to zero as reference.
+        surface_candidates = []
+        if z_min is not None:
+            surface_candidates.append(z_min)
+        if z_max is not None:
+            surface_candidates.append(z_max)
+        surface_z = None
+        if surface_candidates:
+            surface_z = min(surface_candidates, key=lambda v: abs(v))
+        else:
+            finite_z = z_coords[np.isfinite(z_coords)]
+            if finite_z.size:
+                surface_z = float(finite_z[np.argmin(np.abs(finite_z))])
+        if surface_z is None:
+            surface_z = 0.0
+        depth_grid = np.abs(z_coords - surface_z)
+
+        finite_mask = np.isfinite(data) & np.isfinite(depth_grid)
+        depth_mask = (depth_grid >= depth_min)
+        dry_mask = (data < threshold) & finite_mask & depth_mask
+        depth_domain_mask = depth_mask & finite_mask
+
+        total_area = float(depth_domain_mask.sum()) * dA if dA > 0 else 0.0
+        dry_area = float(dry_mask.sum()) * dA if dA > 0 else 0.0
+        area_frac = float(dry_area / total_area) if total_area > 0 else 0.0
+
+        weights = (threshold - data) * dry_mask
         weights[weights < 0] = 0
         total_weight = float(np.sum(weights))
         if total_weight > 0:
             # Use physical coordinates from grid_y/grid_z if available; fallback to indices
             gy = np.asarray(pd.get('grid_y')) if pd.get('grid_y') is not None else None
-            gz = np.asarray(pd.get('grid_z')) if pd.get('grid_z') is not None else None
+            gz = np.asarray(z_coords) if z_coords is not None else None
             if gy is not None and gz is not None and gy.shape == data.shape and gz.shape == data.shape:
                 core_y = float(np.sum(gy * weights) / total_weight)
                 core_z = float(np.sum(gz * weights) / total_weight)
@@ -98,15 +130,48 @@ def _compute_dsl_metrics_from_plot_data(plot_data_list, threshold, season_key=No
             core_y = np.nan
             core_z = np.nan
 
+        if np.any(dry_mask):
+            depth_vals = depth_grid[dry_mask]
+            if np.isfinite(depth_vals).any():
+                thickness = float(np.nanmax(depth_vals) - np.nanmin(depth_vals))
+            else:
+                thickness = 0.0
+            mean_theta = float(np.nanmean(data[dry_mask])) if np.isfinite(data[dry_mask]).any() else np.nan
+        else:
+            thickness = 0.0
+            mean_theta = np.nan
+
         metrics.append({
             "season": season_key,
             "profile_label": "",
             "x_profile_m": pd.get("x_profile"),
             "dsl_area_frac": area_frac,
             "dsl_centroid_y": core_y,
-            "dsl_centroid_z": core_z
+            "dsl_centroid_z": core_z,
+            "dsl_thickness_m": thickness,
+            "dsl_mean_theta": mean_theta
         })
     return metrics
+
+
+def compute_task7_dsl_metrics(th_values, mesh, season_key=None, depth_min=1.0, threshold=None):
+    """
+    Public helper to compute DSL metrics for Task 7 from TH values and mesh.
+    Returns a dict keyed by season/date label (matching seasonal usage).
+    """
+    config_key = "TASK7_HEATMAP_CONFIG"
+    plot_data_list, _, _, _, _ = _calculate_heatmap_data(th_values, "TH", config_key, mesh)
+    if not plot_data_list:
+        return None
+    mask_cfg = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+    threshold_val = threshold if threshold is not None else mask_cfg.get("threshold", 0.12)
+    metrics = _compute_dsl_metrics_from_plot_data(
+        plot_data_list,
+        threshold_val,
+        season_key=season_key,
+        depth_min=depth_min
+    )
+    return {season_key: metrics} if season_key is not None else {"": metrics}
 
 
 def _summarize_heatmap_profiles(
@@ -2143,25 +2208,31 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
     )
 
     if seasonal_avgs:
-        seasonal_plot_data = {}
+        seasonal_plot_data_shifted = {}
+        seasonal_plot_data_raw = {}
+        mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+        threshold = mask_config.get('threshold', 0.12)
         for season_key, season_avg in seasonal_avgs.items():
             if season_avg is None:
                 continue
-            season_plot_data, _, _, _, _ = _calculate_heatmap_data(
+            season_plot_data_raw_list, _, _, season_bounds, _ = _calculate_heatmap_data(
                 season_avg, velocity_name, config_key, mesh
             )
-            season_plot_data, _ = _shift_z_for_visual(
-                season_plot_data,
-                dict(bounds) if isinstance(bounds, dict) else bounds,
+            if not season_plot_data_raw_list:
+                continue
+            seasonal_plot_data_raw[season_key] = season_plot_data_raw_list
+            season_plot_data_shift = copy.deepcopy(season_plot_data_raw_list)
+            season_bounds_shift = copy.deepcopy(season_bounds)
+            season_plot_data_shift, season_bounds_shift = _shift_z_for_visual(
+                season_plot_data_shift,
+                season_bounds_shift,
                 Z_VISUAL_OFFSET
             )
-            if season_plot_data:
-                seasonal_plot_data[season_key] = season_plot_data
+            seasonal_plot_data_shifted[season_key] = season_plot_data_shift
 
-        if seasonal_plot_data:
-            mask_config = PLOT_STYLES.get("SEASONAL_MASK_CONFIG", {})
+        if seasonal_plot_data_shifted:
             _plot_seasonal_heatmap_grid(
-                seasonal_plot_data,
+                seasonal_plot_data_shifted,
                 season_order,
                 len(plot_data_list),
                 velocity_name,
@@ -2173,14 +2244,18 @@ def plot_task_7_heatmaps(results, mesh, output_dir, base_filename_prefix):
                 mask_overlay_data=None,
                 apply_mask=mask_config.get('enabled', False)
             )
-            threshold = mask_config.get('threshold', 0.12)
-            for season_key, pdata_list in seasonal_plot_data.items():
-                metrics = _compute_dsl_metrics_from_plot_data(pdata_list, threshold, season_key=season_key)
+            for season_key, pdata_list_raw in seasonal_plot_data_raw.items():
+                metrics = _compute_dsl_metrics_from_plot_data(
+                    pdata_list_raw,
+                    threshold,
+                    season_key=season_key,
+                    depth_min=1.0
+                )
                 if metrics:
                     dsl_metrics_out[season_key] = metrics
             seasonal_rows = []
             seasonal_series = results.get("seasonal_series", {})
-            for season_key, season_plot_data in seasonal_plot_data.items():
+            for season_key, season_plot_data in seasonal_plot_data_shifted.items():
                 series = seasonal_series.get(season_key)
                 if series is None:
                     continue

@@ -73,7 +73,7 @@ except ImportError:
 
 SMTP_CONFIG = {
     "server": "smtp.gmail.com",
-    "port": 465,
+    "port": 587,
     "sender_email": "lizhengyu1118@gmail.com",
     "sender_password": "zcup lvjb ayre pxpd" 
 }
@@ -81,7 +81,7 @@ RECIPIENT_EMAIL = "lizhengyu1118@gmail.com"
 
 # --- Optional fixed profile date for Task 7 per-folder visualization ---
 # Set to a string like "2013-06-02" to enable; set to None to disable.
-TASK7_PROFILE_DATE = None
+TASK7_PROFILE_DATE = '2013-06-02'
 
 # --- Helper Functions ---
 
@@ -238,6 +238,7 @@ def run_analysis():
     mesh_cache = {}
     # Cache date-specific TH slices for Task 7 when a fixed date is set
     task7_date_cache = {}
+    task7_dsl_date_cache = {}
     # Cache Task 6 results for unified color scaling
     task6_cache = {}
     # --- End MODIFICATION ---
@@ -514,6 +515,14 @@ def run_analysis():
                                 "th_slice": th_data[idx],
                                 "mesh": mesh
                             }
+                            metrics = plot.compute_task7_dsl_metrics(
+                                th_data[idx],
+                                mesh,
+                                season_key=TASK7_PROFILE_DATE,
+                                depth_min=1.0
+                            )
+                            if metrics:
+                                task7_dsl_date_cache[selected_folder_name] = metrics
                             print(f"Cached TH slice for {selected_folder_name} at date {TASK7_PROFILE_DATE} (index {idx}).")
                     except Exception as e:
                         print(f"Warning: Failed to cache date-specific data for {selected_folder_name}: {e}")
@@ -597,6 +606,38 @@ def run_analysis():
                     )
                 except Exception as e:
                     print(f"Warning: Failed to generate Task 7 date combined plot: {e}")
+                combined_rows = []
+                for veg in veg_order:
+                    metrics = task7_dsl_date_cache.get(veg)
+                    if not metrics:
+                        continue
+                    for season_key, rows in metrics.items():
+                        for row in rows:
+                            out = dict(row)
+                            out["vegetation"] = veg
+                            combined_rows.append(out)
+                if combined_rows:
+                    df_comb = pd.DataFrame(combined_rows)
+                    cols_order = [
+                        "vegetation",
+                        "season",
+                        "profile_label",
+                        "x_profile_m",
+                        "dsl_area_frac",
+                        "dsl_centroid_y",
+                        "dsl_centroid_z",
+                        "dsl_thickness_m",
+                        "dsl_mean_theta"
+                    ]
+                    df_comb = df_comb[[c for c in cols_order if c in df_comb.columns] + [c for c in df_comb.columns if c not in cols_order]]
+                    csv_path = os.path.join(output_dir, f"{run_date_str}_ALL_Task7_DSLMetrics_{TASK7_PROFILE_DATE.replace('-', '')}.csv")
+                    try:
+                        df_comb.to_csv(csv_path, index=False)
+                        print(f"Saved date-specific DSL metrics to {csv_path}")
+                    except Exception as e:
+                        print(f"Warning: Failed to save date-specific DSL metrics CSV: {e}")
+                else:
+                    print("Warning: No DSL metrics available for date-specific Task 7 output.")
         else:
             veg_order = ["exoticshrub", "exoticgrass", "arablecrop", "naturalgrass"]
             missing = [v for v in veg_order if v not in task7_results_cache or v not in mesh_cache]
@@ -628,7 +669,17 @@ def run_analysis():
                             combined_rows.append(out)
                 if combined_rows:
                     df_comb = pd.DataFrame(combined_rows)
-                    cols_order = ["vegetation", "season", "profile_label", "x_profile_m", "dsl_area_frac", "dsl_centroid_y", "dsl_centroid_z"]
+                    cols_order = [
+                        "vegetation",
+                        "season",
+                        "profile_label",
+                        "x_profile_m",
+                        "dsl_area_frac",
+                        "dsl_centroid_y",
+                        "dsl_centroid_z",
+                        "dsl_thickness_m",
+                        "dsl_mean_theta"
+                    ]
                     df_comb = df_comb[[c for c in cols_order if c in df_comb.columns] + [c for c in df_comb.columns if c not in cols_order]]
                     csv_path = os.path.join(output_dir, f"{run_date_str}_ALL_Task7_DSLMetrics.csv")
                     try:
